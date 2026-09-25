@@ -1,0 +1,182 @@
+1.stream=True的效果:
+核心解答: response 是一个可迭代的流对象，可以不断从服务器取回新片段，可以把它想成水龙头，水一流出来，就能立刻接到
+
+代码片段:
+    response = client.chat.completions.create(
+        ...,
+        stream=True
+    )
+
+    for chunk in response:
+        ...
+    解析:
+        (1).程序向大模型服务发出请求
+        (2).服务开始生成回答
+        (3).不必等完整回答生成完，create() 就会立刻返回 response 这个“流”
+        (4).随后进入 for chunk in response
+        (5).每当服务端生成了一小段新文本，循环就拿到一个 chunk
+        (6).没有新文本到达时，循环会暂时等待；不是不停空转
+        (7).服务端发送结束标志后，循环结束
+
+
+
+2.所有python中的流对象都可以像这样遍历吗  -   需要实现可迭代协议
+
+3.这种用for循环直接遍历流对象，来不断取出新来的元素的操作，在C++里面好像没有吧，并且想要实现这个循环应该也不简单，各种细节标志等都要我自己来控制      -       一般需要借助网络库提供的回调、阻塞读取，或 C++20 协程(来数据就调用这个协程)
+
+4.stream=False时，这个response对象应该不是流对象了，直接时一个普通对象了？
+| 参数 | `response` 的性质 | 取内容方式 |
+|---|---|---|
+| `stream=True` | 流式可迭代对象 | `for chunk in response` |
+| `stream=False` | 完整响应对象 | `response.choices[0].message.content` |
+
+
+
+流式性能怎么样，能看到好多apifox里面收到的http响应有大量内容是重复的
+
+5.这个chunk是个什么对象，这里从右上角apifox返回的情况来看，chunk像一个字典，但是为什么代码中访问其中内容时都是通过.运算符，而不是类似delta["content"]     -      原始数据时json，看起来的确像python字典；但是这里其实是json格式经过openai的SDK，被转换为一个对象，json字段转换为对应属性，通过.运算符来访问
+
+6.for循环既然能进入，说明大模型肯定发送了一些内容，为什么在代码中还要有这个校验：if chunk.choices[0].delta.content        -       循环能进入，只说明“服务端发来了一条流事件”，不代表这条事件里一定有可拼接的文本，
+例如：
+    第一个 chunk：只说明角色是 assistant，content 可能是 None
+    最后一个 chunk：通常表示生成结束，带 finish_reason="stop"，但 content 可能又是 None
+    如果启用了工具调用等能力，某些 chunk 可能携带的是工具调用信息，而不是文本
+
+7.查看官方文档，st.empty()返回的是个什么东西，为什么它可以调用chat_messages方法，为什么它调用chat_messages时不会像streamlit对象调用时创建一个新对话框     -       st.empty() 返回的是一个“单元素占位容器”对象。它的核心特点是：这个位置同一时间只保留一个界面元素；下一次写入会替换上一次内容，即每次设置会覆盖上一次的设置
+这个对象和 st 一样，也能调用许多组件方法，包括 chat_message()
+
+response_message.chat_message("assistant").write(full_response)含义:
+在 response_message 这个固定占位位置中，放入一个 assistant 类型的聊天消息框，并显示 full_response
+
+8.streamlit的循环可以用Qt的渲染循环来理解吗，主脚本干的事情主要有刷新ui，脚本执行的效果知识更改数据，需要执行到重新渲染才会真正像浏览器发送已经渲染好的数据
+
+9.Streamlit 容器：
+    (1)其核心作用就是记录它里面放了哪些控件，以及这些控件应插入的页面区域及其层级、顺序等详细信息；
+    (2)控件的具体大小、样式不全由容器记录，还会受控件参数和前端布局规则影响
+
+10.streamlit中的上下文机制
+    (1).with是python中管理上下文的关键字
+    (2).当前控件应该放到哪个容器上就是一个上下文信息
+    (3).Streamlit 用一个 ContextVar 保存“容器栈”
+    (4).直接调用streamlit的控件方法，这个控件会被放到“容器栈”最顶层的容器中；但是如果通过"对象."来调用，控件就会放到这个对象上
+
+11.在运行到 "var = text_input()" 这种控件的代码时，其返回值情况:
+    - 没输入：var == ""(没摁回车/摁下回车)
+    - 输入 hello：var == "hello"
+
+
+12.st.session_state保存streamlt中的控件状态
+当给streamlit中的控件函数设置了key="wigget_key"时，可以通过st.session_state.widget_key来访问该控件的状态(例如其中的值, 对于chat_input，session_state中的对应key表示即将提交到python的值)
+没有写 key 的控件，Streamlit 会有内部标识来管理它，但你不应依赖某个 st.session_state.xxx 名称去读写它
+
+13.chat_input预填值
+if st.button("填入提示词"):
+    st.session_state.chat_input = "请分析这份测试日志"
+st.chat_input(key="chat_input")
+
+streamlit执行时的流程：
+点击按钮
+  ↓
+程序设置 session_state["chat_input"]
+  ↓
+key="chat_input" 的聊天框读取该值
+  ↓
+聊天框预填“请分析这份测试日志”
+  ↓
+Streamlit 自动清空 session_state["chat_input"] //NOTE - st.session_state.chat_input直接相当于chat_input控件的内容，不清空相当于直接默认用户选择的预填内容直接发送
+  ↓
+用户自行修改、发送
+  ↓
+st.chat_input() 在本次运行返回用户真正提交的内容
+
+14.大模型请求接口
+模型只负责根据输入生成文本，不直接决定 HTTP 地址
+Ollama：本地运行模型的服务程序，它决定支持哪些 HTTP 接口
+
+Ollama 通常同时有两套接口：
+| 接口类型 | 典型地址 | 用途 |
+|---|---|---|
+| Ollama 原生接口 | `/api/chat`、`/api/generate` | 直接用 Ollama 的请求格式 |
+| OpenAI 兼容接口 | `/v1/chat/completions` | 让 `openai` 等现有客户端可以直接接入 |
+
+查看ollama有哪些模型：curl http://127.0.0.1:11434/api/tags
+测试ollama是否支持openai规范接口：curl http://127.0.0.1:11434/v1/models
+    - 返回 404 Not Found：这个路径通常不支持
+    - 返回 400，并提示缺少 model、messages 等字段：路径存在，但请求体不对
+    - 正常返回模型列表或回答：接口可用
+
+"v1" 是 API 的第一版规范，不是模型版本
+completions 的意思是“文本补全”：给模型一段输入，让它续写或生成后续文本
+
+client = OpenAI(...)
+client.chat.completions.create
+表示生成以"v1/chat/completions"结尾的http请求
+
+ollama默认只监听127.0.0.1，需要在设置中打开expose ollama to network才能让它监听其他机器的请求
+
+15.apofox中的环境设置(调试发送请求的接口界面，右上角一个下拉框)
+    (1)MOCK：本意为“虚假”，该环境下 Apifox 按定义或自动生成的示例响应，假装接口已经返回了数据
+       Mock 的价值是：后端或 Ollama 还没部署好时，前端也能先开发和测试页面流程
+    (2).环境变量：为当前环境保存一组可复用的值，避免把地址、密钥等写死在每个接口里
+    例如：
+    | 变量名 | 值 |
+    |---|---|
+    | `ollama_base_url` | `http://192.168.1.23:11434` |
+    | `model_name` | `deepseek-r1:8b` |
+    然后在接口里：{{ollama_base_url}}/v1/chat/completions
+    
+    它只是 Apifox 在发送某条请求时，用来替换 {{变量名}} 的项目内配置；和终端里的环境变量不一样
+
+16.openai第三方库使用方式
+
+(1).常见使用流程
+创建客户端 → 用户输入 → 组装上下文消息 → 调用模型 → 流式返回文本 → 页面展示 → 保存本轮对话
+
+(2).创建客户端的方式
+client = OpenAI(
+    api_key="任意占位值或本地服务要求的值",
+    base_url="http://<运行ollama机器的ip地址>:11434/v1"
+)
+
+(3).渲染历史会话记录方式
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+(4).流式输出方式
+with st.chat_message("assistant"):
+    stream = client.chat.completions.create(
+        model="你的模型名",
+        messages=st.session_state.messages,
+        stream=True
+    )
+    answer = st.write_stream(
+        chunk.choices[0].delta.content or ""
+        for chunk in stream
+    )
+
+st.session_state.messages.append(
+    {"role": "assistant", "content": answer}
+)
+
+17.st.write_stream(stream, *, cursor=None)
+(1).函数核心参数:
+核心只有一个参数stream，一个可迭代对象 / 生成器，它能不断产出要显示的数据
+
+(2).函数效果:
+不断向当前streamlit容器写对应数据，直到全部写完才返回
+
+(3).函数返回值: list[Any] | str
+是整个流全部输出完毕之后拼起来的完整结果
+
+18.python函数中中yield关键字
+(1).效果
+立刻交出一个值，并记住当前函数执行位置(函数还未结束)；下一次调用next()时从这一行后面继续执行
+函数执行到yield之后控制流会走到函数外面，只是“暂停并交回控制权”；总共只有一个线程，不是创建新线程，也不是并行执行
+
+(2).返回值
+有 yield 的函数会变成生成器函数，其返回的对象是特殊的生成器对象
+在流式输出语境下可以把它简单理解为一个能按需不断产出数据的“流对象”
+
+(3).生成器对象
+生成器对象实现了迭代器协议__next__()，在生成器对象语境下可以理解为通过next(<对象>)来获取下一个产物

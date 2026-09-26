@@ -180,3 +180,20 @@ st.session_state.messages.append(
 
 (3).生成器对象
 生成器对象实现了迭代器协议__next__()，在生成器对象语境下可以理解为通过next(<对象>)来获取下一个产物
+
+19.ollama模型自动卸载
+Ollama 默认会在模型最后一次请求后约 5 分钟卸载模型
+可以通过OLLAMA_KEEP_ALIVE环境变量来设置模型保活时间: "-1"为永久保活知道手动关闭或异常退出；"1h"为最后一次请求后保活1小时
+
+20.渲染markdown
+    (1).streamlit中会自动按照markdown格式渲染输出到，不用手动套一层st.markdown()来渲染
+    (2).st.markdown存在的意义
+        - 语义明确：代码一看就知道这段内容预期是 Markdown
+        - 更适合专门控制 Markdown：例如 width、text_alignment、标题锚点 anchors、换行 wrap 等参数
+        - 类型更稳定：st.write() 会根据传入对象自动决定显示方式；字符串显示 Markdown，列表/字典可能显示表格，异常显示错误框等
+        - st.write(data)是万能输出方式，会根据数据类型自动选择展示方式，不好控制输出格式
+        - st.amrkdown何以明确要求：无论如何按 Markdown 文本渲染
+    (3).聊天项目中可按这个习惯
+        - AI 当前正在生成：st.write_stream()，负责流式输出。
+        - 历史对话重新显示：st.markdown(message["content"])，明确它保存的是 Markdown 文本。
+

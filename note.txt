@@ -66,8 +66,11 @@ response_message.chat_message("assistant").write(full_response)含义:
 
 
 12.st.session_state保存streamlt中的控件状态
-当给streamlit中的控件函数设置了key="wigget_key"时，可以通过st.session_state.widget_key来访问该控件的状态(例如其中的值, 对于chat_input，session_state中的对应key表示即将提交到python的值)
-没有写 key 的控件，Streamlit 会有内部标识来管理它，但你不应依赖某个 st.session_state.xxx 名称去读写它
+    (1).当给streamlit中的控件函数设置了key="wigget_key"时，可以通过st.session_state.widget_key来访问该控件的状态(例如其中的值, 对于chat_input，session_state中的对应key表示即将提交到python的值)
+    (2).没有写 key 的控件，Streamlit 会有内部标识来管理它，但你不应依赖某个 st.session_state.xxx 名称去读写它
+    (3).一个控件在通过key和session_state的某个key绑定之后不可以：“在这个控件被创建出来之后再通过session_state api来改变这个控件的值“，原因：
+    组件创建时，Streamlit 已经决定该输入框本轮要显示什么值；若后面再改变session_state api，相当于组件已经渲染到页面后，又在后端偷偷改它的绑定值。前端可能显示旧值、后端却存新值，因此 Streamlit 直接禁止这种顺序
+
 
 13.chat_input预填值
 if st.button("填入提示词"):
@@ -217,3 +220,49 @@ openai/
 Python 默认不会递归导入整个包目录(像C++自动包含头文件中的头文件)
 一个包的导入情况取决于其目录下面的__init__.py
 这样能避免启动时导入大量无关代码，也能减少循环导入问题
+
+24.调试streamlit程
+{
+    "version": "0.2.0", //vscode的调试配置文件版本，通常这样写
+    "configurations": [
+        {
+            "name": "调试 Streamlit main.py", //展示在调试选项的下拉框中
+            "type": "debugpy", //使用 Python 调试器，debugpy 是 VS Code Python 插件用于运行、断点暂停 Python 代码的调试组件
+            "request": "launch", //由 VS Code 启动一个新的pyhton程序进程，还有另一种常见值是 attach，用于连接到已经运行的 Python 程序
+            "module": "streamlit", //让 Python 以模块方式启动 Streamlit，和下面的args和起来等价于:  "python -m streamlit run 项目目录/main.py --server.port 8501"
+            "args": [
+                "run",
+                "${workspaceFolder}/main.py",
+                "--server.port",
+                "8501"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false //允许跳转到第三方库代码
+        }
+    ]
+}
+
+25.C/C++/python的文件函数都可以在写模式下文件不存在的时候自动创建文件，但是不会在父目录不存在的情况下自动创建父目录
+| 语言 | 函数/方式 | 读模式文件不存在 | 写模式文件不存在 |
+|---|---|---|---|
+| Python | `open(path, "r")` | 抛 `FileNotFoundError` | — |
+| Python | `open(path, "w")` | — | 自动创建 |
+| C | `fopen(path, "r")` | 返回 `NULL` | — |
+| C | `fopen(path, "w")` | — | 自动创建 |
+| C++ | `std::ifstream(path)` | 打开失败，流状态为失败 | — |
+| C++ | `std::ofstream(path)` | — | 自动创建 |
+
+26.streamlit启动时的目录情况
+    (1).脚本中的.是streamlit启动时所在目录，不是脚本所在目录；在脚本中使用.不稳定
+    (2).想要获取脚本所在目录，可以使用"from pathlib import Path; parent_dir "
+
+27.linux目录权限
+x 对普通文件表示“可执行”；但对目录含义不同，表示“可进入/可访问目录内部”
+新建文件需要两项配合：
+    - w：允许修改目录里的“文件名列表”，即添加、删除、重命名
+    - x：允许真正进入该目录、按文件名定位并操作文件
+最好开通一个目录的所有权限，不要只开一半
+
+28.streamlit的回调函数
+可以使用using the parameters on_change (or on_click), args, and kwargs来指定回调
+一次触发导致的回调会在整个rerun之前运行

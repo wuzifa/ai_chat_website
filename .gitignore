@@ -2,5 +2,7 @@
 test.py
 # 测试用提示词
 test_prompt.txt
+# 数据目录
+data
 
 .DS_Store

@@ -1,4 +1,6 @@
 # py草稿本文件
 test.py
+# 测试用提示词
+test_prompt.txt
 
 .DS_Store

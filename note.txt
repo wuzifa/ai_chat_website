@@ -42,7 +42,7 @@
     最后一个 chunk：通常表示生成结束，带 finish_reason="stop"，但 content 可能又是 None
     如果启用了工具调用等能力，某些 chunk 可能携带的是工具调用信息，而不是文本
 
-7.查看官方文档，st.empty()返回的是个什么东西，为什么它可以调用chat_messages方法，为什么它调用chat_messages时不会像streamlit对象调用时创建一个新对话框     -       st.empty() 返回的是一个“单元素占位容器”对象。它的核心特点是：这个位置同一时间只保留一个界面元素；下一次写入会替换上一次内容，即每次设置会覆盖上一次的设置
+7.查看官方文档，st.empty()返回的是个什么东西，为什么它可以调用chat_messages方法，为什么它调用chat_messages时不会像streamlit对象调用时创建一个新对话框     -       st.empty() 返回的是一个“单元素占位容器”对象它的核心特点是：这个位置同一时间只保留一个界面元素；下一次写入会替换上一次内容，即每次设置会覆盖上一次的设置
 这个对象和 st 一样，也能调用许多组件方法，包括 chat_message()
 
 response_message.chat_message("assistant").write(full_response)含义:
@@ -105,6 +105,7 @@ Ollama 通常同时有两套接口：
     - 返回 400，并提示缺少 model、messages 等字段：路径存在，但请求体不对
     - 正常返回模型列表或回答：接口可用
 
+ruguo1s如果是openai第一版接口，base_url需要在末尾加上v1
 "v1" 是 API 的第一版规范，不是模型版本
 completions 的意思是“文本补全”：给模型一段输入，让它续写或生成后续文本
 
@@ -194,6 +195,25 @@ Ollama 默认会在模型最后一次请求后约 5 分钟卸载模型
         - st.write(data)是万能输出方式，会根据数据类型自动选择展示方式，不好控制输出格式
         - st.amrkdown何以明确要求：无论如何按 Markdown 文本渲染
     (3).聊天项目中可按这个习惯
-        - AI 当前正在生成：st.write_stream()，负责流式输出。
-        - 历史对话重新显示：st.markdown(message["content"])，明确它保存的是 Markdown 文本。
+        - AI 当前正在生成：st.write_stream()，负责流式输出
+        - 历史对话重新显示：st.markdown(message["content"])，明确它保存的是 Markdown 文本
 
+21.dict.setdefault(key, default, /)方法
+(key: Key, default: Any, /) -> Any
+如果存在key
+    D.setdefault(k[,d]) --返回-> D.get(k,d)
+否则
+    set D[k]=d, 并返回value
+
+22.字典类型注释
+dict[str, str]
+字典[key类型, value类型]
+
+23.python导入模块
+openai/
+├── __init__.py
+└── types/
+    └── chat/
+Python 默认不会递归导入整个包目录(像C++自动包含头文件中的头文件)
+一个包的导入情况取决于其目录下面的__init__.py
+这样能避免启动时导入大量无关代码，也能减少循环导入问题

@@ -4,5 +4,10 @@ test.py
 test_prompt.txt
 # 数据目录
 data
+# 课程示例代码
+course_example.py
+# 计划文件
+plan.md
+plan.txt
 
 .DS_Store

@@ -266,3 +266,38 @@ x 对普通文件表示“可执行”；但对目录含义不同，表示“可
 28.streamlit的回调函数
 可以使用using the parameters on_change (or on_click), args, and kwargs来指定回调
 一次触发导致的回调会在整个rerun之前运行
+
+29.google fonts
+    (1).st.logo支持pung图片路径作为logo，st.button不支持，但是可以使用标准wob icon图片google fonts
+    (2).Google Fonts is a free library of open‑source web fonts that you can browse and embed on websites using a simple CSS link, available at http://fonts.google.com.
+    (3).在streamlit中使用 goolge fonts: icon=":material/<图标名>:"
+
+30.python中变量赋值终极含义
+核心就一句话：变量名绑定对象，所有 "变量放在等号左边" 全部理解为 "在给一个名字绑定对象"
+Python 变量名像可重新绑定对象的引用，放在等号左边就是“在改变引用指向”
+
+a = [1, 2] #NOTE - 给a绑定[1,2]
+b = a          #NOTE - 这里是给b绑定a对象；结果为a、b 指向同一个列表
+
+b.append(3)     #NOTE - 因为b和a绑定的是同一个对象，所以这里为修改同一个对象
+print(a)        # [1, 2, 3]
+
+b = [4, 5]      #NOTE - 这里是给a重新绑定对象，所以不影响 a
+print(a)        # [1, 2, 3]
+print(b)        # [4, 5]
+
+31."字典"推导式
+不仅有[v for v in <list> [if ...]]列表推导式，还有
+字典推导式
+{
+    k: v
+    for k, v in <dict>
+    [if ...]
+}
+
+32.lambda表达式
+    语法：lambda 参数列表(逗号分隔) : 函数体
+    例子：lambda a, b : a + b
+    注意事项：
+        lambda的函数体只能是一个有返回值的表达式，不能换行
+        赋值语句不能作为lambda函数体

@@ -68,6 +68,8 @@ response_message.chat_message("assistant").write(full_response)含义:
 12.st.session_state保存streamlt中的控件状态
     (1).当给streamlit中的控件函数设置了key="wigget_key"时，可以通过st.session_state.widget_key来访问该控件的状态(例如其中的值, 对于chat_input，session_state中的对应key表示即将提交到python的值)
     (2).没有写 key 的控件，Streamlit 会有内部标识来管理它，但你不应依赖某个 st.session_state.xxx 名称去读写它
+        //NOTE - 如果没给一个控件设置key，Streamlit会根据组件类型、按钮文字、位置/参数等自动生成内部 ID，但是如果正好凑巧两个同层级、参数相同的按钮的key相同，streamlit会报错：StreamlitDuplicateElementId
+
     (3).一个控件在通过key和session_state的某个key绑定之后不可以：“在这个控件被创建出来之后再通过session_state api来改变这个控件的值“，原因：
     组件创建时，Streamlit 已经决定该输入框本轮要显示什么值；若后面再改变session_state api，相当于组件已经渲染到页面后，又在后端偷偷改它的绑定值。前端可能显示旧值、后端却存新值，因此 Streamlit 直接禁止这种顺序
 
@@ -269,8 +271,8 @@ x 对普通文件表示“可执行”；但对目录含义不同，表示“可
 
 29.google fonts
     (1).st.logo支持pung图片路径作为logo，st.button不支持，但是可以使用标准wob icon图片google fonts
-    (2).Google Fonts is a free library of open‑source web fonts that you can browse and embed on websites using a simple CSS link, available at http://fonts.google.com.
-    (3).在streamlit中使用 goolge fonts: icon=":material/<图标名>:"
+    (2).Google Fonts is a free library of open‑source web fonts that you can browse and embed on websites using a simple CSS link, available at http://fonts.google.com/icons
+    (3).在streamlit中使用 goolge fonts: icon=":material/<图标名>:" //NOTE - Material 图标名必须使用小写的 snake_case 名称
 
 30.python中变量赋值终极含义
 核心就一句话：变量名绑定对象，所有 "变量放在等号左边" 全部理解为 "在给一个名字绑定对象"
@@ -301,3 +303,19 @@ print(b)        # [4, 5]
     注意事项：
         lambda的函数体只能是一个有返回值的表达式，不能换行
         赋值语句不能作为lambda函数体
+
+
+33.控件的callback回调传参规则
+    (0).
+    Streamlit 不知道程序员写的回调函数形参长什么样，所以它提供通用入口 args 和 kwargs
+    (1).
+    可设置回调的控件一般会有两个参数: args, kwargs; 这两个不是 Python 的 *args、**kwargs，而是 Streamlit 自己定义的两个普通参数(类型为WidgetArgs/WidgetKwargs )
+    其中:
+        - args 要求是 tuple 或 list
+        - kwargs 要求是 dict
+    (2).streamlit通过这些参数调用回调函数belike:
+        callback(*args, **kwargs) 其中*args为解包元组，**kwargs为解包字典//NOTE - 看不懂移步shoujinote.txt中**解包，组包说明与python函数参数传递规则
+
+
+34.open/remove默认从当前程序启动位置定位目标文
+所以想要稳定删除某个目录下的文件而不受streamlit的影响，需要给open/remove传绝对路径

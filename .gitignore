@@ -2,6 +2,7 @@
 test.py
 # 测试用提示词
 test_prompt.txt
+test_prompt.md
 # 数据目录
 data
 # 课程示例代码

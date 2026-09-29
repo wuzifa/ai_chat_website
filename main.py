@@ -1,6 +1,7 @@
 import json as js
-import uuid
+import uuid  # 生成会话唯一标识
 from datetime import datetime
+from os import listdir, remove
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -9,16 +10,24 @@ import streamlit as st
 
 LOGO = "./chat_robot.png"
 NEW_CHAT_ICON = ":material/add_comment:"
+DELETE_CHAT_ICON = ":material/delete:"
 SAMPLE_CHAT_PROMPT = "你能帮我做什么？"
 BASE_URL = "http://192.168.1.23:11434/v1"
 SYSTEM_PROMPT_TEMPLATE = """
+    语言：使用中文回答
+
     用户要求：
     你的名字：%s
     你的性格：%s
 """
 DEFAULT_MODEL_NAME = ""
 DEFAULT_MODEL_CHARACTER = "你是一个友好、耐心、实用的中文 AI 助手，服务于不熟悉 AI 和技术的普通用户"
-NOT_SAVE_KEY = ["dirty", "prompt"]
+NOT_SAVE_FILEDS = {
+    "dirty": False,
+    "prompt": "",
+    "title": ""
+}
+DATA_DIR = Path(__file__).parent / "data"
 
 
 def create_new_dialogue():
@@ -30,22 +39,11 @@ def create_new_dialogue():
     st.session_state["character"] = DEFAULT_MODEL_CHARACTER
     st.session_state["messages"] = [{"role": "system", "content": SYSTEM_PROMPT_TEMPLATE % (DEFAULT_MODEL_NAME, DEFAULT_MODEL_CHARACTER)}]
     st.session_state["session_id"] = uuid.uuid4().hex
-    st.session_state["created_at"] = datetime.now(tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state["updated_at"] = ""
-    st.session_state["title"] = "新对话"
+    st.session_state["created_at"] = datetime.now(tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%dT%H:%M:%S")
+    st.session_state["updated_at"] = "" #FIXME - 增加更新这块的逻辑
+    st.session_state["title"] = ""
     st.session_state["dirty"] = False
     st.session_state["selected_model"] = "qwen3-vl:8b"
-
-
-def load_sessions() -> list[str]:
-    """
-    返回data目录下的所有会话(在文件内部)
-
-    Returns:
-        list[str]: 会话列表
-    """
-
-    return []
 
 
 def save_dialogue():
@@ -55,14 +53,15 @@ def save_dialogue():
     data = {
         k: v
         for k, v in st.session_state.items()
-        if k not in NOT_SAVE_KEY
+        if k not in NOT_SAVE_FILEDS
     }
+
     #如果data目录不存在则创建目录
-    data_dir = Path(__file__).parent / "data"
-    if not data_dir.exists():
-        data_dir.mkdir(mode=0o744)
+    if not DATA_DIR.exists():
+        DATA_DIR.mkdir(mode=0o744)
+    
     # 打开文件并保存 json 到文件中
-    with open(file = data_dir / f"{st.session_state["session_id"]}.json", mode='w', encoding="utf-8") as f:
+    with open(file = DATA_DIR / f"{st.session_state["session_id"]}_{st.session_state["created_at"]}_{st.session_state["title"]}.json", mode='w', encoding="utf-8") as f:
         js.dump(obj=data, fp=f, ensure_ascii=False, indent=4)
     
 
@@ -86,6 +85,74 @@ def fill_prompt():
     """
     st.session_state["prompt"] = SAMPLE_CHAT_PROMPT
 
+def parse_filename(path: str):
+    """
+    解析会话信息json文件名
+
+    Args:
+        path (str) | None: listdir返回的文件名(带后缀)，如果混了非json文件，返回None
+
+    Returns:
+        tuple[str, str, str]: (uuid, created_at, title)
+    """
+    if not path.endswith(".json"):
+        return None
+    uuid, created_at, title = path.split('_', maxsplit=2) # 根据_分割出三部分
+    title = title[0:-5:] # 去掉json后缀
+    return (uuid, created_at, title)
+
+
+def switch_dialogue(file: str):
+    """
+    切换会话：(1).加载会话文件   (2).更新session_state
+
+    Args:
+        file (str): 会话文件
+    """
+    # 打开文件
+    with open(DATA_DIR / file) as f:
+        fileds_to_update = js.load(f)
+        st.session_state.update(fileds_to_update) # 转换为dict后用来更新st.session_state
+    # 重置st.session_state中在NOT_SAVE_FILEDS的字段
+    st.session_state.update(NOT_SAVE_FILEDS)
+
+def delete_dialogue(file: str):
+    remove(DATA_DIR / file)
+    if st.session_state["session_id"] == parse_filename(file)[0]: # type: ignore
+        create_new_dialogue()
+
+def load_session_names():
+    """
+    加载会话名称，用来渲染并创建历史会话按钮实例
+    """
+    if not DATA_DIR.exists():
+        return
+
+    for file in listdir(str(DATA_DIR)):
+        # 解析文件名
+        file_info = parse_filename(file)
+        if not file_info: # None的情况为"非json文件"
+            continue
+        # 渲染按钮
+        col1, col2 = st.columns([4, 1])
+        with st.sidebar:
+            col1.button(
+                label=file_info[2] if file_info[2] else file_info[1],
+                key=f"switch_{file_info[0]}",
+                on_click=switch_dialogue,
+                args=(file,),
+                width="stretch"
+            )
+            col2.button(
+                label="",
+                icon=DELETE_CHAT_ICON,
+                key=f"delete_{st.session_state["session_id"]}",
+                on_click=delete_dialogue,
+                args=(file,),
+                width="stretch"
+            )
+
+
 
 
 def main():
@@ -108,6 +175,7 @@ def main():
     with st.sidebar:
         st.subheader("会话管理")
         st.button("新建会话", icon=NEW_CHAT_ICON, width="stretch", on_click=on_create_new_clicked)
+        load_session_names()
 
         st.divider()
 
@@ -132,40 +200,45 @@ def main():
             prompt = st.chat_input(placeholder="随便说点什么...", key="prompt")
 
 
-    # 如果用户有实际输入
-    if prompt:
-        # 渲染用户提示词
-        st.chat_message(name="user").write(prompt)
-        st.session_state["messages"].append({
-            "role": "user", 
-            "content": prompt
-        })
-        # 调用大模型生成回答
-        stream_response = client.chat.completions.create(
-            model=st.session_state["selected_model"],
-            messages=st.session_state["messages"],
-            stream=True
-        )
-        # 流式输出大模型的回复
-        with st.chat_message(name="assistant"):
-            full_reply = st.write_stream(stream=
-                (
-                    chunk.choices[0].delta.content or "" 
-                    for chunk in stream_response
-                )
+    # 如果用户没有实际输入，下面的新一轮对话就不用渲染了
+    if not prompt:
+        return
+    
+    # 渲染用户提示词
+    st.chat_message(name="user").write(prompt)
+    st.session_state["messages"].append({
+        "role": "user", 
+        "content": prompt
+    })
+    # 调用大模型生成回答
+    stream_response = client.chat.completions.create(
+        model=st.session_state["selected_model"],
+        messages=st.session_state["messages"],
+        stream=True,
+        timeout=120.0
+    )
+    # 流式输出大模型的回复
+    with st.chat_message(name="assistant"):
+        full_reply = st.write_stream(stream=
+            (
+                chunk.choices[0].delta.content or "" 
+                for chunk in stream_response
             )
-        # 将ai生成的回复也添加到messages历史消息列表中
-        st.session_state["messages"].append({
-            "role": "assistant", 
-            "content": full_reply
-        })
-        st.session_state["dirty"] = True
+        )
+    # 将ai生成的回复也添加到messages历史消息列表中
+    st.session_state["messages"].append({
+        "role": "assistant", 
+        "content": full_reply
+    })
+    st.session_state["dirty"] = True
 
 
 
 if __name__ == "__main__":
     main()
 
+
+st.session_state.update()
 #FIXME - 全部改成回调函数风格，不要在渲染部分里面塞控制逻辑
 #TODO - 用户界面不显示当前模型正在思考的内容，但是在apifox里面可以看到流式完整思考过程，用户体验很不好，我希望像codex app，可以显示思考过程，并且是一个下拉框，用户可以点击选择是否显示思考内容
 #TODO - 点击确定按钮更改ai性格成功之后应该给个提示，否则用户不知道是否应用成功  (总是忘记设置点击确定，应该有个更能明显的提示)
@@ -174,3 +247,6 @@ if __name__ == "__main__":
 # 添加会话记忆功能
 # 使用st.session_state设置一个messages列表来保存历史会话，每轮对话需要像里面append对话
 # 发送提示词则可以直接使用st.session_state
+
+#FIXME - BUG: 如果模型上一条对话还为发送完就发送下一条对话，会吧上一条对话给“遮掉”
+#FIXME - BUG: 新建会话可能触发multiple element with same key的错误，需要调试查看出错流程

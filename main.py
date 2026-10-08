@@ -44,12 +44,21 @@ NOTWIDGET_FIELDS = { # 应该保存到文件中的字段的白名单(非控件�
     "character",
     "selected_model",
     "messages",
+    "title"
 }
 DATA_DIR = Path(__file__).parent / "data"
 # 创建大模型客户端
 CHAT_CLIENT = openai.OpenAI(base_url=BASE_URL) # NOTE - 环境变量里设置了openai_api_key
 TITLE_CLIENT = openai.OpenAI(base_url=BASE_URL)
 
+def clear_title_task():
+    """
+    (1).清除会话的异步标题请求所有相关上下文，防止session_state中旧会话未完成的标题异步请求带到新会话导致标题赋给新会话
+    (2).删除后schedule_task()函数中的"if future is None"语句也能阻止同一个会话的后续请求继续进入后续获取future结果的逻辑
+    """
+    if st.session_state.get("title_future"):
+        st.session_state["title_future"].cancel()
+    del st.session_state["title_future"]
 
 def create_new_dialogue():
     """
@@ -64,7 +73,7 @@ def create_new_dialogue():
     st.session_state["updated_at"] = ""
     st.session_state["current_history_file"] = None # 当前会话对应的json文件
     st.session_state["dirty"] = False
-    # st.session_state["title"] = ""
+    st.session_state["title"] = None
     st.session_state["selected_model"] = "qwen3-vl:8b"
 
 
@@ -83,10 +92,8 @@ def save_dialogue():
         DATA_DIR.mkdir(mode=0o744)
     
     # 打开文件并保存 json 到文件中
-    with open(file = DATA_DIR / f"{st.session_state["session_id"]}_{st.session_state["created_at"]}_{st.session_state["title"]}.json", mode='w', encoding="utf-8") as f:
+    with open(file = DATA_DIR / f"{st.session_state["session_id"]}_{st.session_state["created_at"]}.json", mode='w', encoding="utf-8") as f:
         js.dump(obj=data, fp=f, ensure_ascii=False, indent=4)
-
-    st.session_state["dirty"] = False
     
 
 def on_create_new_clicked():
@@ -118,13 +125,13 @@ def parse_filename(path: str):
         path (str) | None: listdir返回的文件名(带后缀)，如果混了非json文件，返回None
 
     Returns:
-        tuple[str, str, str]: (uuid, created_at, title)
+        tuple[str, str, str]: (uuid, created_at)
     """
     if not path.endswith(".json"):
         return None
-    uuid, created_at, title = path.split('_', maxsplit=2) # 根据_分割出三部分
-    title = title[0:-5:] # 去掉json后缀
-    return (uuid, created_at, title)
+    uuid, created_at = path.split('_', maxsplit=1) # 根据_分割出三部分
+    created_at = created_at[0:-5:] # 去掉json后缀
+    return (uuid, created_at)
 
 
 def switch_dialogue(file: str):
@@ -162,8 +169,10 @@ def load_session_names():
         # 渲染按钮
         col1, col2 = st.columns([4, 1])
         with st.sidebar:
+            with open(DATA_DIR/file) as f:
+                title = js.load(f).get("title")
             col1.button(
-                label=file_info[2] if file_info[2] else file_info[1],
+                label=title if title else file_info[1],
                 key=f"switch_{file_info[0]}",
                 on_click=switch_dialogue,
                 args=(file,),
@@ -184,7 +193,6 @@ def load_session_names():
 def schedule_task():
     """
     1.监视data目录下的json文件是否发生变更，如果变更需要重新rerun整个界面显示这些变化
-    2.检查标题生成任务是否完成
     """
     # 在session_state中设置专门的 k,v对 来记录当前会话记忆中的data目录情况(使用set集合来记录最合适，可以直接用set进行比较)
     st.session_state.setdefault("known_history_files", set())
@@ -197,37 +205,44 @@ def schedule_task():
     }
 
     # 比较session_state和实际情况current_jsonfiles
-    if st.session_state["known_history_files"] == current_jsonfiles:
-        return
+    if st.session_state["known_history_files"] != current_jsonfiles:
+        # 下面是发历史快照和目前文件实际详情不一致，先更新session_state["known_history_files"]快照
+        st.session_state["known_history_files"] = current_jsonfiles
 
-    # 下面是发历史快照和目前文件实际详情不一致，先更新session_state["known_history_files"]快照
-    st.session_state["known_history_files"] = current_jsonfiles
-
-    # 如果当前会话不是新会话，并且会话文件已经被删掉 -> 新建会话并rerun界面
-    if st.session_state["current_history_file"] and not (DATA_DIR/st.session_state["current_history_file"]).exists(): # 如果当前会话不是刚刚新增的并且会话json文件不存在
-        create_new_dialogue() # 新建会话
-        st.rerun() # 重跑脚本，渲染对话与历史会话按钮
-
-
-    future = st.session_state.get("title_future")
-    if future is None or not future.done(): # 先判断None: 不是每个会话都会有标题任务: (1).用户还没发送第一条消息 (2).当前会话不是新会话 (3).标题任务已完成，并且已删除 title_future
-        return
-
+        # 如果当前会话不是新会话，并且会话文件已经被删掉 -> 新建会话并rerun界面
+        if st.session_state["current_history_file"] and not (DATA_DIR/st.session_state["current_history_file"]).exists(): # 如果当前会话不是刚刚新增的并且会话json文件不存在
+            create_new_dialogue() # 新建会话
+            st.rerun() # 重跑脚本，渲染对话与历史会话按钮
     
+    """
+    2.检查标题生成任务是否完成
+    """
+    future = st.session_state.get("title_future")
+    if future is not None and future.done(): # 先判断None: 不是每个会话都会有标题任务: (1).用户还没发送第一条消息 (2).当前会话不是新会话 (3).标题任务已完成，并且已删除 title_future
+        try:
+            st.session_state["title"] = future.result()
+        except Exception as e:  # noqa: BLE001
+            st.session_state["title"] = "新对话"
+            print(e)
+        save_dialogue()
+        # 删除两个key，通过上面的"if future is None"语句来阻止进入这块逻辑
+        
 
 
-def generate_title(first_user_message: str) -> str:
+
+def generate_title(first_user_message: str, model: str) -> str:
     """
     生成会话标题的函数，应被threadpoolexecutor异步调用
 
     Args:
         first_user_message (str): 用户首条消息
+        model (str) : 选择的模型
 
     Returns:
         str: 模型生成的标题
     """
-    response = CHAT_CLIENT.chat.completions.create(
-           model=st.session_state["selected_model"],
+    response = TITLE_CLIENT.chat.completions.create(
+           model=model,
            messages=[
                {"role": "system", "content": GENERATE_TITLE_PROMPT},
                {"role": "user", "content": first_user_message}
@@ -237,6 +252,10 @@ def generate_title(first_user_message: str) -> str:
        )
     title = (response.choices[0].message.content or "新对话").strip() # 模型生成的回复
     return title.replace('\n', ' ')[:12:]
+
+def on_newchat_clicked():
+    save_dialogue() # 把st.session_state["dirty"] = False这句拆出save_dialogue是因为保存标题调用了save_dialogue()
+    st.session_state["dirty"] = False
 
 
 def main():
@@ -262,7 +281,7 @@ def main():
     with st.sidebar:
         st.subheader("会话管理")
         st.button("新建会话", icon=NEW_CHAT_ICON, width="stretch", on_click=on_create_new_clicked)
-        st.button("保存会话", icon=FILE_SAVE_ICON, width="stretch", on_click=save_dialogue)
+        st.button("保存会话", icon=FILE_SAVE_ICON, width="stretch", on_click=on_newchat_clicked)
         load_session_names()
 
         st.divider()
@@ -293,13 +312,11 @@ def main():
     if not prompt:
         return
 
-    # 先判断是否为第一条用户消息
+    # 先判断是否为第一条用户消息 #NOTE - 也可以使用updated_at来判断是否为第一条消息
     not_first = any(
         message["role"] == "user"
         for message in st.session_state["messages"]
     )
-    if not not_first:
-        st.session_state["title_future"] = st.session_state["title_generator"].submit(generate_title, prompt)
 
     # 渲染用户提示词
     st.chat_message(name="user").write(prompt)
@@ -329,14 +346,14 @@ def main():
     })
     st.session_state["updated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["dirty"] = True
+    #NOTE - 到这里回复请求才完毕，再发起标题生成请求，不把标题生成请求放在回复生成请求前面
+    if not not_first:
+        st.session_state["title_future"] = st.session_state["title_generator"].submit(generate_title, prompt, st.session_state["selected_model"])
 
 
 
 if __name__ == "__main__":
     main()
-
-
-st.session_state.update()
 
 #TODO - 用户界面不显示当前模型正在思考的内容，但是在apifox里面可以看到流式完整思考过程，用户体验很不好，我希望像codex app，可以显示思考过程，并且是一个下拉框，用户可以点击选择是否显示思考内容
 #TODO - 点击确定按钮更改ai性格成功之后应该给个提示，否则用户不知道是否应用成功  (总是忘记设置点击确定，应该有个更能明显的提示)
@@ -348,3 +365,4 @@ st.session_state.update()
 
 #FIXME - BUG: 如果模型上一条对话还为发送完就发送下一条对话，会吧上一条对话给“遮掉”
 #FIXME - 将标题融在文件名里会出现下面情况：在标题未生成前就保存会话，save_dialogue之后出现旧的和新的两份会话文件，并且保存会话之后操作的还是旧的会话文件(st.session_state["current_history_file"]没改)，可能导致同一个会话重复保存不同名会话文件; 同时 current_history_file 也没有在保存后更新
+#将文件名在对话保存的时候就固定下来，在json中保存文件名，在加载侧边栏会话时读取json文件将文件名显示在按钮中

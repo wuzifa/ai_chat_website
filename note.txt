@@ -72,6 +72,8 @@ response_message.chat_message("assistant").write(full_response)含义:
 
     (3).一个控件在通过key和session_state的某个key绑定之后不可以：“在这个控件被创建出来之后再通过session_state api来改变这个控件的值“，原因：
     组件创建时，Streamlit 已经决定该输入框本轮要显示什么值；若后面再改变session_state api，相当于组件已经渲染到页面后，又在后端偷偷改它的绑定值。前端可能显示旧值、后端却存新值，因此 Streamlit 直接禁止这种顺序
+    (4).st.session_state不是普通的全局字典，它依赖 Streamlit 当前的运行上下文(和streamlit主线程绑定在一起了)，只有在streamlit主线程里访问st.session_state才知道是访问哪个线程(浏览器会话)的session_satte状态
+    所以如果出现多线程异步任务，不要在非streamlit主线程中访问session_satte，可以把session_state信息通过参数的形式传递进去
 
 
 13.chat_input预填值
@@ -304,8 +306,8 @@ print(b)        # [4, 5]
     语法：lambda 参数列表(逗号分隔) : 函数体
     例子：lambda a, b : a + b
     注意事项：
-        lambda的函数体只能是一个有返回值的表达式，不能换行
-        赋值语句不能作为lambda函数体
+        lambda的函数体只能是一个表达式，不能换行
+        如果表达式是
 
 
 33.控件的callback回调传参规则
@@ -394,3 +396,23 @@ st.session_state["debug_tab_id"] == "D4E5F6"
     (1).先创建ThreadPoolExecutor/ProcessPoolExecutor对象，关键参数为max_workers
     (2).使用submit提交任务，关键位置参数为要执行的函数和函数参数
     (3).submit返回的对象为Future类，可使用done()判断是否完成，result()获取结果(future.result() 默认会阻塞当前线程，直到后台任务完成、失败或被取消；常见做法为先判断done，再调用result())
+异常：
+    发生异常时，submit()函数返回的 Future 会把后台线程中的异常保存起来
+    此时future.done() 会返回 True，调用future.result() 才会重新抛出该异常
+    所以在获取result的时候一般包在try catch块中
+as_completed()函数：
+    用途：给它一批 Future，谁先完成就先返回谁
+    as_completed(futures) 返回迭代器；for 会阻塞等待，直到至少有一个任务完成
+    例子：
+    for future in as_completed(futures, timeout=5):
+        ...
+    阻塞等待一批future对象完成，完成一个for就拿到一个完成的Future对象，超过5s之后还没拿到下一个Future对象，就抛出TimeoutError
+线程任务参数传递：
+    在submit()中传递给线程任务函数的参数还是引用传递，不是值拷贝！！所以在线程函数里面修改这个变量在线程外面看得到修改
+丢弃/取消任务：
+    del future通常只是删掉页面保存的future引用；后台线程任务和 HTTP 请求仍会继续，模型仍会生成标题；只是完成后结果没人读取，相当于丢弃结果
+    future.cancel()对已运行任务(不在线程池中，已经开始执行线程任务函数)通常返回 False，不会中断线程；只有任务还在线程池队列中、尚未开始执行时才会取消成功，后续不再调用线程任务函数
+
+39.pyhton中的:=
+    进行赋值之后再返回右边的那个值，C++中的=是返回=左边的引用
+    python中的=只是赋值，不会返回任何值

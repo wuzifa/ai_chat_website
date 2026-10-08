@@ -14,7 +14,7 @@ NEW_CHAT_ICON = ":material/add_comment:"
 DELETE_CHAT_ICON = ":material/delete:"
 FILE_SAVE_ICON = ":material/file_save:"
 SAMPLE_CHAT_PROMPT = "你能帮我做什么？"
-BASE_URL = "http://192.168.1.23:11434/v1"
+BASE_URL = "http://172.20.10.4:11434/v1"
 SYSTEM_PROMPT_TEMPLATE = """
     语言：使用中文回答
 
@@ -33,8 +33,7 @@ DEFAULT_MODEL_NAME = ""
 DEFAULT_MODEL_CHARACTER = "你是一个友好、耐心、实用的中文 AI 助手，服务于不熟悉 AI 和技术的普通用户"
 CHAT_DEFAULT_FIELD = { # 一个会话被新增时应该取其中默认值的kv对
     "dirty": False,
-    "prompt": "", # 为了设置提示次输入框而存在的session_state kv对
-    "title": ""
+    "prompt": "" # 为了设置提示次输入框而存在的session_state kv对
 }
 NOTWIDGET_FIELDS = { # 应该保存到文件中的字段的白名单(非控件字段)
     "session_id",
@@ -58,7 +57,7 @@ def clear_title_task():
     """
     if st.session_state.get("title_future"):
         st.session_state["title_future"].cancel()
-    del st.session_state["title_future"]
+    st.session_state.pop("title_future", None)
 
 def create_new_dialogue():
     """
@@ -75,6 +74,7 @@ def create_new_dialogue():
     st.session_state["dirty"] = False
     st.session_state["title"] = None
     st.session_state["selected_model"] = "qwen3-vl:8b"
+    clear_title_task()
 
 
 def save_dialogue():
@@ -136,7 +136,7 @@ def parse_filename(path: str):
 
 def switch_dialogue(file: str):
     """
-    切换会话：(1).加载会话文件   (2).更新session_state
+    切换会话：(1).加载会话文件   (2).更新session_state  (3).清除旧的标题生成任务
 
     Args:
         file (str): 会话文件
@@ -148,6 +148,8 @@ def switch_dialogue(file: str):
     # 重置st.session_state中应取默认值的字段
     st.session_state.update(CHAT_DEFAULT_FIELD)
     st.session_state["current_history_file"] = file
+    # 清除title生成相关上下文
+    clear_title_task()
 
 def delete_dialogue(file: str):
     remove(DATA_DIR / file)
@@ -193,7 +195,9 @@ def load_session_names():
 def schedule_task():
     """
     1.监视data目录下的json文件是否发生变更，如果变更需要重新rerun整个界面显示这些变化
+    2.检查标题生成任务是否完成
     """
+
     # 在session_state中设置专门的 k,v对 来记录当前会话记忆中的data目录情况(使用set集合来记录最合适，可以直接用set进行比较)
     st.session_state.setdefault("known_history_files", set())
 
@@ -214,9 +218,6 @@ def schedule_task():
             create_new_dialogue() # 新建会话
             st.rerun() # 重跑脚本，渲染对话与历史会话按钮
     
-    """
-    2.检查标题生成任务是否完成
-    """
     future = st.session_state.get("title_future")
     if future is not None and future.done(): # 先判断None: 不是每个会话都会有标题任务: (1).用户还没发送第一条消息 (2).当前会话不是新会话 (3).标题任务已完成，并且已删除 title_future
         try:
@@ -226,6 +227,8 @@ def schedule_task():
             print(e)
         save_dialogue()
         # 删除两个key，通过上面的"if future is None"语句来阻止进入这块逻辑
+        clear_title_task()
+        st.rerun() # 标题生成完毕之后应该刷新一次页面，让给侧边栏的按钮刷新出刚生成的标题
         
 
 
@@ -366,3 +369,6 @@ if __name__ == "__main__":
 #FIXME - BUG: 如果模型上一条对话还为发送完就发送下一条对话，会吧上一条对话给“遮掉”
 #FIXME - 将标题融在文件名里会出现下面情况：在标题未生成前就保存会话，save_dialogue之后出现旧的和新的两份会话文件，并且保存会话之后操作的还是旧的会话文件(st.session_state["current_history_file"]没改)，可能导致同一个会话重复保存不同名会话文件; 同时 current_history_file 也没有在保存后更新
 #将文件名在对话保存的时候就固定下来，在json中保存文件名，在加载侧边栏会话时读取json文件将文件名显示在按钮中
+
+#FIXME - BUG: 测试定时重跑函数，没有正确处理其他会话删除当前会话文件的情况
+#FIXME - BUG: 测试异步生成标题，标题生成任务一直卡住，GPU占用一直过高；服务端模型一直stop不掉，怀疑是客户端发了过多请求

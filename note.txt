@@ -416,3 +416,12 @@ as_completed()函数：
 39.pyhton中的:=
     进行赋值之后再返回右边的那个值，C++中的=是返回=左边的引用
     python中的=只是赋值，不会返回任何值
+
+40.安全获取/删除dict中key的方法：
+直接dict[<key>]在key不存在时会报KeyError
+下面两个
+    dict.get(<key>, <defaultvaue>)
+    dict.pop(<key>, <defaultvaue>) # 会返回这个被pop掉的key，所以需要在<key>不存在时指定默认值
+不会在<key>不存在时报错
+
+41.函数体里只有开头的第一条单独出现的三引号字符串才是函数说明文档，后面出现的三引号字符串都不默认是说明文档，是单独的字符串表达式，而单独的表达式会被streamlit认为是需要显示在界面上的内容

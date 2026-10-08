@@ -10,5 +10,7 @@ course_example.py
 # 计划文件
 plan.md
 plan.txt
+# 其他文件
+ai应用开发.md
 
 .DS_Store

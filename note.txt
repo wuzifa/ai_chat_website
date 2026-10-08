@@ -66,7 +66,7 @@ response_message.chat_message("assistant").write(full_response)含义:
 
 
 12.st.session_state保存streamlt中的控件状态
-    (1).当给streamlit中的控件函数设置了key="wigget_key"时，可以通过st.session_state.widget_key来访问该控件的状态(例如其中的值, 对于chat_input，session_state中的对应key表示即将提交到python的值)
+    (1).当给streamlit中的控件函数设置了key="wigget_key"时，可以通过st.session_state.widget_key来访问该控件的状态(value值例如代表该控件的返回值, 对于chat_input，session_state中的对应key表示即将提交到python的值; 对于按钮，value为bool类型，表示该按钮是否被按下)
     (2).没有写 key 的控件，Streamlit 会有内部标识来管理它，但你不应依赖某个 st.session_state.xxx 名称去读写它
         //NOTE - 如果没给一个控件设置key，Streamlit会根据组件类型、按钮文字、位置/参数等自动生成内部 ID，但是如果正好凑巧两个同层级、参数相同的按钮的key相同，streamlit会报错：StreamlitDuplicateElementId
 
@@ -210,9 +210,12 @@ Ollama 默认会在模型最后一次请求后约 5 分钟卸载模型
 否则
     set D[k]=d, 并返回value
 
-22.字典类型注释
+22. 字典
+(1).字典类型注释
 dict[str, str]
 字典[key类型, value类型]
+(2).
+使用[]获取字典的值时在这个键不存在时会直接报错，get函数在不存在时会返回None，可以指定不存在时的默认
 
 23.python导入模块
 openai/
@@ -319,3 +322,75 @@ print(b)        # [4, 5]
 
 34.open/remove默认从当前程序启动位置定位目标文
 所以想要稳定删除某个目录下的文件而不受streamlit的影响，需要给open/remove传绝对路径
+
+
+35.隐形的StreamlitValueAssignmentNotAllowedError(在控件设置key之后再通过session_state更改控件状态)
+对应错误的git版本号: e7a5a3d
+代码描述: 使用黑名单保存不该保存到文件中的key，黑名单没排除删除按钮的key; 在加载会话文件时更改了session_state中的该按钮的key
+
+错误链推导: 给删除按钮绑定key -> session_state中有这个key -> sssion_state保存黑名单没排除删除按钮的key -> 删除按钮的kv对混进文件 -> 加载会话时会对这个按钮的k对应的v重新赋值(session_state.update)，但是前面一轮渲染已经创建了删除按钮，不能再通过session_state更新这个按钮 -> 报错
+
+解决方案: 使用白名单把session_state中的 “会话数据” 和 “界面控件状态” 分开，只把 session_state 中非控件部分持久化到 JSON
+例如:
+NOTWIDGET_FIELDS = {
+    "session_id",
+    "created_at",
+    "updated_at",
+    "name",
+    "character",
+    "selected_model",
+    "messages",
+}
+这样即使以后新增很多按钮，也不会影响会话文件
+
+
+36.st.fragment
+    (1).核心作用: 把一段 UI + Python 逻辑切成“局部可单独重跑的区域”
+    普通 Streamlit 中，用户点任意按钮，通常整份 main.py 都从上到下重跑；而 fragment 内部的控件被操作时，默认只重跑这个 fragment 函数，页面其他部分保持不动
+
+    (2).简单例子:
+    @st.fragment
+    def release_the_balloons():
+        st.button("Release the balloons")
+        st.balloons()
+
+    with st.spinner("Inflating balloons..."):
+        time.sleep(5)
+
+    release_the_balloons()
+    st.button("Inflate more balloons")
+    
+    点击按钮 "Release the balloons"时只会执行函数 release_the_balloons 内部的逻辑，不会触发rerun，不会导致整个页面卡住5秒
+    点击按钮 "Inflate more balloons" 之后整个脚本重新执行，运行到time.sleep(5)时整个页面卡住5秒
+
+    (3).run_every参数可以将fragment转化为定期运行的函数
+    //NOTE - run_every参数不会让streamlit从一开始就自动每2s执行一次这个函数，它的含义是: 这个 fragment 一旦被当前标签页调用并注册成功，之后每隔 2 秒重跑一次
+    需要在脚本的任意位置调用该函数之后，streamlit才会注册这个重跑函数，并且在当前标签页保持连接时，每隔 2 秒只再次执行 watch_deleted_session() 的函数体
+
+    (4).使用装饰器将函数转换为fragment:
+    @st.fragment(run_every="2s")
+    def fragment_func():
+        ...
+
+
+37.多标签页下的streamlit调试
+vscode的调试对象是一个进程，一个streamlit进程可以管理多个session，它们的脚本完全一样，但是st.session_state不完全一样
+例如:
+一个 Streamlit 服务进程
+├── 浏览器标签页 A → Session A → 执行同一份 main.py → Session State A
+└── 浏览器标签页 B → Session B → 执行同一份 main.py → Session State B
+可以在session_state增加key，在调试时watch这个key来判断当前触发断点的是哪个session
+例如:
+# 标签页 A
+st.session_state["debug_tab_id"] == "A1B2C3"
+
+# 标签页 B
+st.session_state["debug_tab_id"] == "D4E5F6"
+
+38.concurrent.future使用方式
+概念：
+    Python 标准库中的一个包，用于简化并发编程，模块提供线程池和进程池的高层次接口，一般ThreadPoolExecutor适合处理 I/O 密集型任务，ProcessPoolExecutor适合处理 CPU 密集型任务
+使用：
+    (1).先创建ThreadPoolExecutor/ProcessPoolExecutor对象，关键参数为max_workers
+    (2).使用submit提交任务，关键位置参数为要执行的函数和函数参数
+    (3).submit返回的对象为Future类，可使用done()判断是否完成，result()获取结果(future.result() 默认会阻塞当前线程，直到后台任务完成、失败或被取消；常见做法为先判断done，再调用result())

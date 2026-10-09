@@ -184,10 +184,28 @@ st.session_state.messages.append(
 
 (2).返回值
 有 yield 的函数会变成生成器函数，其返回的对象是特殊的生成器对象
+生成器函数的返回值生成器对象在被赋值是只是保存了一个对于该生成器对象的引用，还没有启动这个流/生成器
 在流式输出语境下可以把它简单理解为一个能按需不断产出数据的“流对象”
 
 (3).生成器对象
 生成器对象实现了迭代器协议__next__()，在生成器对象语境下可以理解为通过next(<对象>)来获取下一个产物
+
+(4).完整获取生成器对象产物的流程
+脚本代码:
+    def gen():
+        yield 1
+        yield 2
+        return "结束信息"
+    g = gen()
+    try:
+        while True:
+            print(next(g))
+    except StopIteration as e:
+        print(e.value)  # 结束信息
+    正常 for 循环只能拿到 1、2；执行到 return 时，生成器结束，return 后面的值不会作为普通元素产出，而是放进 StopIteration.value 并作为异常抛出
+    return 的作用主要是提前结束生成器；多数情况下直接写 return 即可；yield 是暂停并产出值，return 是彻底结束。
+
+
 
 19.ollama模型自动卸载
 Ollama 默认会在模型最后一次请求后约 5 分钟卸载模型
@@ -425,3 +443,91 @@ as_completed()函数：
 不会在<key>不存在时报错
 
 41.函数体里只有开头的第一条单独出现的三引号字符串才是函数说明文档，后面出现的三引号字符串都不默认是说明文档，是单独的字符串表达式，而单独的表达式会被streamlit认为是需要显示在界面上的内容
+
+42.python的可变对象与不可变对象
+    (1)区别: 在赋值后能不能原地修改对象本身
+        Python的 = 都是让变量名指向某个对象(添加引用)，默认不会复制对象
+        = 只是共享对象；可变对象的“修改”会影响所有引用，不可变对象的“修改”实际是创建新对象并重新绑定变量名
+    如果想要像C++里面那样的拷贝，需要使用copy()成员函数:
+        a = [1, 2, 3]
+        b = a.copy()      # 推荐，语义最清楚
+    并且还需要区分浅拷贝和深拷贝
+
+    (2).不可变对象的成员方法特点:
+    不可变对象不能原地修改；带有“修改”性质的成员方法通常是返回一个新对象，原对象不变
+    例如:
+    s = "hello"
+    new_s = s.upper()
+    print(s)      # hello
+    print(new_s)  # HELLO
+    str 的 upper()、replace()、strip() 等都是这样
+
+43.python的copy模块
+(1).使用
+    # 导入copy库
+    import copy
+
+    copy.copy() # 浅拷贝
+    copy.deepcopy() # 深拷贝
+(2).相关事项:
+    - 对于不可变对象，本来就不存在=通过赋值之后的名字引用修改原对象的可能，所以对于int, str这类对象通常直接返回原对象本身
+      例如:
+      import copy
+      x = "hello"
+      y = copy.deepcopy(x)
+      
+      print(x is y)  # 通常为 True
+    - 可变对象递归复制
+    - 对于可变不可变对象的嵌套情况，一句话:
+      如果内层包含可变对象，那它的所有外层对象都需要进行拷贝(先检查内层，再决定外层)
+    例如:
+    import copy
+
+    a = ([1, 2], "hello")
+    b = copy.deepcopy(a)
+
+    print(a is b)        # False，元组不是同一个(元组包含的第一个元素是list，为可变对象)
+    print(a[0] is b[0])  # False，内部列表也不是同一个(list是可变对象)
+    print(a[1] is b[1])  # True，字符串可复用(字符串是不可变对象)
+
+    - memo 缓存
+      memo 是本次复制过程中的“已复制对象记录表”，主要解决两个问题
+      第一，避免循环引用无限递归，例如:
+      import copy
+
+      a = []
+      a.append(a)       # 列表内部引用自己
+      
+      b = copy.deepcopy(a)
+      print(b is b[0])  # True
+
+      第二，保留原对象中的共享关系，例如:
+      import copy
+
+      child = [1, 2]
+      a = [child, child]
+      b = copy.deepcopy(a)
+      
+      print(b[0] is b[1])  # True
+      print(b[0] is child) # False
+
+44.python类对象
+class User:
+    pass
+python 不只是记住一段“模板文字”，而是会在内存中创建一个对象，并把它绑定给名字 User。这个对象保存了类名、方法、类属性等信息，所以称为类对象
+print(User)        # <class '__main__.User'>
+print(type(User))  # <class 'type'>
+
+Python 把类也设计成对象，因此类可以被赋值、作为参数传入函数、动态添加属性：
+def show_class(cls):
+    print(cls.__name__)
+
+show_class(User)  # User
+
+User.school = "XX大学"
+print(u.school)   # XX大学
+和 C++ 最容易混淆的地方是：C++ 里 class User { ... }; 更接近编译期的类型定义；Python 里的 class User: 执行时会真正创建 User 这个类对象。
+
+45.st.rerun()
+重新执行整个脚本，相当于立刻从头开始执行，上一轮rerun()后面的代码将没机会执行
+

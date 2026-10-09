@@ -1,6 +1,6 @@
 import json as js
 import uuid  # 生成会话唯一标识
-from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import datetime
 from os import listdir, remove
 from pathlib import Path
@@ -12,7 +12,6 @@ import streamlit as st
 LOGO = "./chat_robot.png"
 NEW_CHAT_ICON = ":material/add_comment:"
 DELETE_CHAT_ICON = ":material/delete:"
-FILE_SAVE_ICON = ":material/file_save:"
 SAMPLE_CHAT_PROMPT = "你能帮我做什么？"
 BASE_URL = "http://172.20.10.4:11434/v1"
 SYSTEM_PROMPT_TEMPLATE = """
@@ -22,13 +21,20 @@ SYSTEM_PROMPT_TEMPLATE = """
     你的名字：%s
     你的性格：%s
 """
-GENERATE_TITLE_PROMPT = """
-    根据下面的用户首条消息生成聊天标题
-    要求：
-    1. 使用中文；
-    2. 不超过 12 个字；
-    3. 只返回标题，不要引号、解释、序号；
+
+TITLE_OPEN = "[[TITLE]]"
+TITLE_CLOSE = "[[/TITLE]]"
+TITLE_GENERATE_PROMPT = """
+    本轮是新会话的第一轮回复
+
+    最终回答必须以如下格式开头：
+    [[TITLE]]不超过12字的中文标题[[/TITLE]]
+
+    1.标题后立刻输出正常回答
+    2.标题只概括用户问题主题
+    3.不要在标题中使用引号、标点、序号或换行
 """
+
 DEFAULT_MODEL_NAME = ""
 DEFAULT_MODEL_CHARACTER = "你是一个友好、耐心、实用的中文 AI 助手，服务于不熟悉 AI 和技术的普通用户"
 CHAT_DEFAULT_FIELD = { # 一个会话被新增时应该取其中默认值的kv对
@@ -48,16 +54,47 @@ NOTWIDGET_FIELDS = { # 应该保存到文件中的字段的白名单(非控件�
 DATA_DIR = Path(__file__).parent / "data"
 # 创建大模型客户端
 CHAT_CLIENT = openai.OpenAI(base_url=BASE_URL) # NOTE - 环境变量里设置了openai_api_key
-TITLE_CLIENT = openai.OpenAI(base_url=BASE_URL)
 
-def clear_title_task():
+def first_reply_body_stream(stream, title_result: list[str]):
     """
-    (1).清除会话的异步标题请求所有相关上下文，防止session_state中旧会话未完成的标题异步请求带到新会话导致标题赋给新会话
-    (2).删除后schedule_task()函数中的"if future is None"语句也能阻止同一个会话的后续请求继续进入后续获取future结果的逻辑
+    解析首轮模型的流式回复
+
+    Args:
+        stream (流): 模型返回的流
+        title_result (list[str]): 传出参数，用来记录标题是否成功生成以及标题结果
     """
-    if st.session_state.get("title_future"):
-        st.session_state["title_future"].cancel()
-    st.session_state.pop("title_future", None)
+    title_parsed = False # 是否已经解析到完整标题
+    buffer = "" # 目前为止当前模型已经生成的字符串回复
+    # 遍历模型返回的流
+    for chunk in stream: # for循环中的continue语句
+        content = chunk.choices[0].delta.content
+        if not content: # 如果模型输出空白，跳过这一个chunk
+            continue
+        if title_parsed: # 如果标题已经解析出来了，后面的就都是回复正文，直接返回这个chunk，并直接continue读取下一个chunk
+            yield content
+            continue
+        # 还没解析出完整标题就会执行到这里，此时直接把content加入buffer，然后判断是否出现完整标题
+        buffer += content.strip()
+        if buffer.startswith(TITLE_OPEN):
+            title_end = buffer.find(TITLE_CLOSE)
+            if title_end != -1: # 如果找到了标题开始标志也找到了标题结束标志
+                title_parsed = True
+                title_result[0] = buffer[len(TITLE_OPEN):title_end].replace('\n', ' ').strip()[:12] or "新标题" # 取出标题并过滤处理
+                remain_body = buffer[title_end + len(TITLE_CLOSE):] #一个chunk可能同时包含标题结束标志和正文，需要拿走剩下的正文部分
+                if remain_body:
+                    yield remain_body
+                    continue # 防止极端情况标题加上一小段正文正好超出下面的边界长度
+        if len(buffer) >= 128: # >=128长度还是没有找到完整标题，直接把所有内容全部扔(yield)给聊天，并清空buffer，因为后续肯定走if len(buffer) >= 128分支，并yield buffer，那么需要先把前面已经yield掉的部分清空
+            title_result[0] = "新对话"
+            title_parsed = False
+            yield buffer
+            buffer = ""
+    if not title_parsed: # 如果循环结束还是未解析到完整标题，并且未触发128长度限制
+        title_result[0] = "新对话"
+        if buffer:
+            yield buffer
+    
+            
 
 def create_new_dialogue():
     """
@@ -74,7 +111,6 @@ def create_new_dialogue():
     st.session_state["dirty"] = False
     st.session_state["title"] = None
     st.session_state["selected_model"] = "qwen3-vl:8b"
-    clear_title_task()
 
 
 def save_dialogue():
@@ -94,6 +130,8 @@ def save_dialogue():
     # 打开文件并保存 json 到文件中
     with open(file = DATA_DIR / f"{st.session_state["session_id"]}_{st.session_state["created_at"]}.json", mode='w', encoding="utf-8") as f:
         js.dump(obj=data, fp=f, ensure_ascii=False, indent=4)
+
+    st.session_state["dirty"] = False
     
 
 def on_create_new_clicked():
@@ -148,8 +186,6 @@ def switch_dialogue(file: str):
     # 重置st.session_state中应取默认值的字段
     st.session_state.update(CHAT_DEFAULT_FIELD)
     st.session_state["current_history_file"] = file
-    # 清除title生成相关上下文
-    clear_title_task()
 
 def delete_dialogue(file: str):
     remove(DATA_DIR / file)
@@ -216,49 +252,10 @@ def schedule_task():
         # 如果当前会话不是新会话，并且会话文件已经被删掉 -> 新建会话并rerun界面
         if st.session_state["current_history_file"] and not (DATA_DIR/st.session_state["current_history_file"]).exists(): # 如果当前会话不是刚刚新增的并且会话json文件不存在
             create_new_dialogue() # 新建会话
-            st.rerun() # 重跑脚本，渲染对话与历史会话按钮
-    
-    future = st.session_state.get("title_future")
-    if future is not None and future.done(): # 先判断None: 不是每个会话都会有标题任务: (1).用户还没发送第一条消息 (2).当前会话不是新会话 (3).标题任务已完成，并且已删除 title_future
-        try:
-            st.session_state["title"] = future.result()
-        except Exception as e:  # noqa: BLE001
-            st.session_state["title"] = "新对话"
-            print(e)
-        save_dialogue()
-        # 删除两个key，通过上面的"if future is None"语句来阻止进入这块逻辑
-        clear_title_task()
-        st.rerun() # 标题生成完毕之后应该刷新一次页面，让给侧边栏的按钮刷新出刚生成的标题
         
-
-
-
-def generate_title(first_user_message: str, model: str) -> str:
-    """
-    生成会话标题的函数，应被threadpoolexecutor异步调用
-
-    Args:
-        first_user_message (str): 用户首条消息
-        model (str) : 选择的模型
-
-    Returns:
-        str: 模型生成的标题
-    """
-    response = TITLE_CLIENT.chat.completions.create(
-           model=model,
-           messages=[
-               {"role": "system", "content": GENERATE_TITLE_PROMPT},
-               {"role": "user", "content": first_user_message}
-           ],
-           stream=False,
-           timeout=90.0
-       )
-    title = (response.choices[0].message.content or "新对话").strip() # 模型生成的回复
-    return title.replace('\n', ' ')[:12:]
-
-def on_newchat_clicked():
-    save_dialogue() # 把st.session_state["dirty"] = False这句拆出save_dialogue是因为保存标题调用了save_dialogue()
-    st.session_state["dirty"] = False
+        st.rerun() # 重跑脚本，渲染对话与历史会话按钮
+        
+    
 
 
 def main():
@@ -270,12 +267,6 @@ def main():
     st.title("AI聊天伴侣")
     #TODO - 添加当前会话名称
 
-    # 初始化一个tltle创建线程
-    st.session_state.setdefault(
-        "title_generator",
-        ThreadPoolExecutor(max_workers=1, thread_name_prefix="title")
-    )
-
     # 第一次进入网页/刷新时创建一个新会话
     if "session_id" not in st.session_state:
         create_new_dialogue()
@@ -284,7 +275,6 @@ def main():
     with st.sidebar:
         st.subheader("会话管理")
         st.button("新建会话", icon=NEW_CHAT_ICON, width="stretch", on_click=on_create_new_clicked)
-        st.button("保存会话", icon=FILE_SAVE_ICON, width="stretch", on_click=on_newchat_clicked)
         load_session_names()
 
         st.divider()
@@ -316,7 +306,7 @@ def main():
         return
 
     # 先判断是否为第一条用户消息 #NOTE - 也可以使用updated_at来判断是否为第一条消息
-    not_first = any(
+    is_first_round = not any(
         message["role"] == "user"
         for message in st.session_state["messages"]
     )
@@ -327,31 +317,37 @@ def main():
         "role": "user", 
         "content": prompt
     })
+
+    temp_messages = deepcopy(st.session_state["messages"])#FIXME - 测试这里copy()是否修复了st.session_state["messages"][0]["content"]仍然携带标题生成提示次的bug
+    temp_messages[0]["content"] += TITLE_GENERATE_PROMPT
+    title_res: list[str] = ["新对话"]
+
     # 调用大模型生成回答
     stream_response = CHAT_CLIENT.chat.completions.create(
         model=st.session_state["selected_model"],
-        messages=st.session_state["messages"],
+        messages=temp_messages if is_first_round else st.session_state["messages"],
         stream=True,
-        timeout=60.0
+        timeout=180.0
     )
+
+    stream_gen = first_reply_body_stream(stream_response, title_res) if is_first_round else (chunk.choices[0].delta.content or "" for chunk in stream_response) # 想要生成器对象还能“返回”标题生成结果，最方便的做法是传入一个可变对象title_res(list[str])
+
     # 流式输出大模型的回复
     with st.chat_message(name="assistant"):
-        full_reply = st.write_stream(stream=
-            (
-                chunk.choices[0].delta.content or "" 
-                for chunk in stream_response
-            )
-        )
+        full_reply = st.write_stream(stream=stream_gen)
+
     # 将ai生成的回复也添加到messages历史消息列表中
     st.session_state["messages"].append({
-        "role": "assistant", 
+        "role": "assistant",
         "content": full_reply
     })
     st.session_state["updated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["dirty"] = True
-    #NOTE - 到这里回复请求才完毕，再发起标题生成请求，不把标题生成请求放在回复生成请求前面
-    if not not_first:
-        st.session_state["title_future"] = st.session_state["title_generator"].submit(generate_title, prompt, st.session_state["selected_model"])
+
+    if is_first_round:
+        st.session_state["title"] = title_res[0]
+
+    save_dialogue()
 
 
 
@@ -371,4 +367,20 @@ if __name__ == "__main__":
 #将文件名在对话保存的时候就固定下来，在json中保存文件名，在加载侧边栏会话时读取json文件将文件名显示在按钮中
 
 #FIXME - BUG: 测试定时重跑函数，没有正确处理其他会话删除当前会话文件的情况
-#FIXME - BUG: 测试异步生成标题，标题生成任务一直卡住，GPU占用一直过高；服务端模型一直stop不掉，怀疑是客户端发了过多请求
+#FIXME - 首轮会话生成标题速度可以忍受(好像第一次使用模型时有点慢，后面的还好)，要等将近两分钟才能加载出来助手生成的回复
+
+
+# 其他可选方案与难度：
+#     - 应用层延迟标题任务：容易实现
+#       聊天回复结束后不要立刻提交标题任务，先等待一段“用户空闲时间”；期间若用户继续发消息，就不生成标题
+#       缺点：标题任务一旦真正启动，后续聊天仍可能排队
+#     - 取消“第二次标题请求”：最推荐，也较容易✅✅✅
+#       让首轮聊天回复顺便带上标题，或直接由首条消息截取生成标题这样 Ollama 始终只处理聊天回复，不存在标题阻塞聊天的问题
+#     - 标题使用独立模型服务或云 API：实现中等
+#       标题和聊天走不同推理端，互不阻塞；但你当前 8G 显存不适合本地再常驻一个模型，云 API 则需要网络和密钥
+#     - 提高 Ollama 并发：不推荐
+#       理论上可尝试并行请求，但它不是优先级机制；8G 显存下更可能导致显存不足、上下文缩小或两边都变慢
+
+
+#     写一份首轮用来生成标题的提示词TITLE_GENERATE_PROMPT，在发起请求时判断当前轮次是否为第一轮，如果是则发起请求时使用 "SYSTEM_PROMPT_TEMPLATE + TITLE_GENERATE_PROMPT"，后续请求正常使用SYSTEM_PROMPT_TEMPLATE
+

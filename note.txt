@@ -569,3 +569,79 @@ Base64 是一种“把二进制数据写成普通文本字符串”的编码方�
     image_file.size  # 文件字节数
     - 也有python文件类型的基础操作:
     image_bytes = image_file.getvalue()
+
+
+49.Pillow 图片处理
+核心作用：Python 中读取、校验、缩放、裁剪、保存图片的常用库；当前聊天项目主要用于校验用户上传的图片真实格式
+
+安装：
+    python3 -m pip install Pillow
+
+导入：
+    from io import BytesIO
+    from PIL import Image, UnidentifiedImageError
+
+(1).打开图片并读取基本信息
+    with Image.open("example.png") as image: # 打开失败抛出UnidentifiedImageError异常
+        print(image.format)  # "PNG"，真实图片格式
+        print(image.size)    # (宽, 高)，单位是像素
+        print(image.mode)    # "RGB"、"RGBA" 等颜色模式
+
+    Image.open() 可接收文件路径、Path、二进制文件对象；UploadedFile 本身也能直接传入
+    Image.open() 是延迟读取：先识别图片头，真正访问像素或调用 image.load() 时才会解码图片
+
+(2).校验 Streamlit 上传图片的真实格式
+    raw_bytes = image_file.getvalue()
+    try:
+        with Image.open(BytesIO(raw_bytes)) as image:
+            image_format = image.format
+            image.verify()
+    except (UnidentifiedImageError, OSError):
+        raise ValueError("不是可读取的图片")
+
+    if image_format not in {"PNG", "JPEG", "WEBP"}:
+        raise ValueError("只支持 PNG、JPEG、WEBP")
+
+    ==不要只相信 image_file.name 后缀或 image_file.type；它们来自用户文件名/浏览器信息。应以 image.format 为准。==
+    image.verify() 用于发现损坏的图片结构；调用后当前 image 对象不能继续使用，需要重新 Image.open()
+
+(3).生成缩略图
+    with Image.open("origin.png") as image:
+        preview = image.copy()  # 保留原图
+        preview.thumbnail((320, 320))
+        preview.save("preview.png")
+
+    thumbnail((最大宽, 最大高))：等比缩小，结果不会超过给定范围
+    WRONG_POINT - thumbnail() 会直接修改原来的 Image 对象；原图之后还要使用时必须先 copy()
+
+(4).固定尺寸缩放与裁剪
+    with Image.open("origin.png") as image:
+        resized = image.resize((512, 512), Image.Resampling.LANCZOS)
+        resized.save("resized.png")
+
+        # 坐标含义：(左, 上, 右, 下)，不是 (左, 上, 宽, 高)
+        cropped = image.crop((100, 50, 500, 350))
+        cropped.save("cropped.png")
+
+    resize()：强制指定宽高，可能改变原图比例
+    crop()：截取矩形区域，右 = 左 + 宽，下 = 上 + 高
+
+(5).保存与格式转换
+    with Image.open("origin.png") as image:
+        image.convert("RGB").save("result.jpg", "JPEG", quality=90)
+
+    save(路径)：通常根据文件后缀判断输出格式
+    save(文件对象, format="PNG")：写入 BytesIO 等文件对象时必须明确填写 format
+    PNG 可能是 RGBA（带透明通道），JPEG 不支持透明通道；保存 JPEG 前通常先 convert("RGB")
+
+- thumbnail时按比例缩放，不超过对应长宽的最大限制，resize()时强行缩放，有拉伸副作用
+- Image读取图像时是通过文件头，streamlit的chat_input只是通过文件后缀来限制传入的文件类型，所以不能信任streamlit前端传入的文件类型
+- resize()常用插值算法:
+算法	速度	画质特点	适合场景
+NEAREST	最快	直接取最近像素，边缘锯齿明显	像素画、标签图、掩码图
+BOX	快	缩小时做简单平均，质量一般	快速缩小、不在意细节
+BILINEAR	中等	较平滑，但文字和边缘容易模糊	对速度有要求的普通预览
+HAMMING	中等	比双线性更锐利，较少块状感	特定缩小场景，较少主动使用
+BICUBIC	较慢	画质和速度平衡，Pillow 默认	大多数普通图片
+LANCZOS	最慢	细节保留最好，缩小截图/文字通常效果好；极少数边缘可能有轻微光晕	高质量缩略图、截图缩小
+- verify()校验图像是否损坏会推进底层文件读取位置，调用该函数后如果想要继续操作图片例如: 读取像素、缩放、保存等，需要重新Image.open()，失败抛出OSError

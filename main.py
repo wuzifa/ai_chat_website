@@ -2,12 +2,15 @@ import json as js
 import uuid  # 生成会话唯一标识
 from copy import deepcopy
 from datetime import datetime
+from io import BytesIO
 from os import listdir, remove
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import openai
 import streamlit as st
+import streamlit.typing as sttype
+from PIL import Image, UnidentifiedImageError
 
 LOGO = "./chat_robot.png"
 NEW_CHAT_ICON = ":material/add_comment:"
@@ -15,24 +18,60 @@ DELETE_CHAT_ICON = ":material/delete:"
 SAMPLE_CHAT_PROMPT = "你能帮我做什么？"
 BASE_URL = "http://172.20.10.4:11434/v1"
 SYSTEM_PROMPT_TEMPLATE = """
-    语言：使用中文回答
+你必须严格按以下顺序输出：
+[[AGENT_META]]
+{"title": null, "images": []}
+[[/AGENT_META]]
+正式回复正文...
 
-    用户要求：
-    你的名字：%s
-    你的性格：%s
+规则：
+1. AGENT_META 必须位于输出最开头，前面不能有任何文字
+2. AGENT_META 中必须是合法 JSON 对象，不能使用 Markdown 代码块
+3. 正式回复只能写在 [[/AGENT_META]] 之后
+4. 不要向用户解释、复述或展示 AGENT_META
+5. title只有在系统明确要求总结标题时需要填写标题，其余情况保持null；images 默认输出空数组；只有系统明确要求总结本轮图片时，才填写对应图片信息
+6. 使用中文回答用户
+
+用户对于你的要求：
+你的名字：%s
+你的性格：%s
 """
 
-TITLE_OPEN = "[[TITLE]]"
-TITLE_CLOSE = "[[/TITLE]]"
+IMAGE_PROMPT = """
+本轮请求包含图片，图片处理要求：
+1.上下文中的图片分为三类：
+
+(1). 图片目录
+其中只提供历史图片的编号与 summary，用于概括理解历史图片
+这些图片没有附带原图，不能据此推断像素级细节
+
+(2). 精确历史图片
+这些是用户手动勾选后附带的历史原图，用于精确查看
+它们已经生成过图片记忆，只能用于回答当前问题，不要重复生成或修改其图片记忆
+
+(3). 本轮新上传图片
+这些是用户刚刚发送的原图
+请结合图片内容回答用户问题，并为每张新图片生成图片记忆
+
+2.图片记忆生成规则：
+
+(1). 只为“本轮新上传图片”生成 AGENT_META.images 项
+(2). 每项必须使用对应图片的 image_id
+(3). summary：不超过 60 个汉字；概括图片主体、关键内容、可检索关键词和重要问题
+(4). ocr_text：仅提取清晰且重要的可见文字；没有则使用空字符串
+(5). 图片看不清或无法确认时，summary 中应说明不确定性；不要编造细节或 OCR 文字
+(6). 不要在正式回复中展示 AGENT_META、JSON 或内部图片编号，除非用户主动要求图片编号
+"""
+
+AGENT_OPEN = "[[AGENT]]"
+AGENT_CLOSE = "[[/agent]]"
 TITLE_GENERATE_PROMPT = """
-    本轮是新会话的第一轮回复
+本轮是新会话的第一轮回复
+请在 AGENT_META 的 title 字段中生成一个标题
 
-    最终回答必须以如下格式开头：
-    [[TITLE]]不超过12字的中文标题[[/TITLE]]
-
-    1.标题后立刻输出正常回答
-    2.标题只概括用户问题主题
-    3.不要在标题中使用引号、标点、序号或换行
+1.标题只概括用户问题主题
+2.不要在标题中使用引号、标点、序号或换行
+3. 不要在正式回复正文中重复标题
 """
 
 DEFAULT_MODEL_NAME = ""
@@ -49,11 +88,20 @@ NOTWIDGET_FIELDS = { # 应该保存到文件中的字段的白名单(非控件�
     "character",
     "selected_model",
     "messages",
-    "title"
+    "title",
+    "next_image_seq"
 }
 DATA_DIR = Path(__file__).parent / "data"
 # 创建大模型客户端
 CHAT_CLIENT = openai.OpenAI(base_url=BASE_URL) # NOTE - 环境变量里设置了openai_api_key
+MAX_IMAGES_PER_MESSAGE = 4 #单个对话最多上传4张图片
+MAX_IMAGE_PIXELS = 1e8 # 最大支持一亿像素图片
+IMAGE_FORMAT_TO_MIME = {
+    "PNG": "image/png",
+    "JPEG": "image/jpeg",
+    "WEBP": "image/webp",
+}
+
 
 def first_reply_body_stream(stream, title_result: list[str]):
     """
@@ -111,6 +159,7 @@ def create_new_dialogue():
     st.session_state["dirty"] = False
     st.session_state["title"] = None
     st.session_state["selected_model"] = "qwen3-vl:8b"
+    st.session_state["image"] = {}
 
 
 def save_dialogue():
@@ -255,7 +304,56 @@ def schedule_task():
         
         st.rerun() # 重跑脚本，渲染对话与历史会话按钮
         
-    
+
+def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
+    """
+    保存本轮用户上传的图片信息到session_satte，并返回这些图片对应的 image_id 列表
+
+    Args:
+        upload_files (UploadedFile): st.chat_input返回的files列表
+
+    Returns:
+        list[str]: 该函数对于每个被保存的图片生成的id
+    """
+    st.session_state.setdefault("next_image_seq", 0) # 下一个图片id
+
+    if len(upload_files) > MAX_IMAGES_PER_MESSAGE:
+        raise ValueError(f"单次最多上传 {MAX_IMAGES_PER_MESSAGE} 张图片")
+
+    # 不采取：边一张一张校验同时保存到session_state，采取：全部校验完成之后一起保存到session_state；避免部分失败的情况
+    checked_images = [] # 已校验图片
+    for image in upload_files:
+        image_name = image.name
+        try:
+            with Image.open(image) as image_file:
+                image_format = image_file.format
+                w, h = image_file.size
+                if w * h > MAX_IMAGE_PIXELS: # 校验图片像素尺寸
+                    raise ValueError(f"图片 {image_name} 像素尺寸太大")
+                image_file.verify() # 校验图片完整性
+        except (UnidentifiedImageError, OSError): # 校验是否为图片
+            raise ValueError(f"图片 {image_name} 无法正常读取")
+        if image_format not in IMAGE_FORMAT_TO_MIME: # 校验图片格式是否受支持
+            raise ValueError(f"图片 {image_name} 格式为 {image_format}，不支持")
+        checked_images.append({
+            "id": st.session_state["next_image_seq"],
+            "mime_type": IMAGE_FORMAT_TO_MIME[image_format],
+            "raw_bytes": image.getvalue()
+        })
+        st.session_state["next_image_seq"] += 1
+
+    # 创建图片保存路径
+    attachments_dir: Path = DATA_DIR / "attachments" / st.session_state["session_id"] # 图片保存绝对路径
+    attachments_dir.mkdir(mode=0o744, exist_ok=True)
+
+    image_ids = [] # 生成的图片id列表
+
+    for checked_image in checked_images:
+        f"attachments/{st.session_state["session_id"]}/img_{st.session_state["next_image_seq"]:03d}.{image_format.lower()}" # 相对path的路径
+
+
+
+    return [""]  
 
 
 def main():
@@ -379,31 +477,14 @@ if __name__ == "__main__":
 
 #TODO - 用户界面不显示当前模型正在思考的内容，但是在apifox里面可以看到流式完整思考过程，用户体验很不好，我希望像codex app，可以显示思考过程，并且是一个下拉框，用户可以点击选择是否显示思考内容
 #TODO - 点击确定按钮更改ai性格成功之后应该给个提示，否则用户不知道是否应用成功  (总是忘记设置点击确定，应该有个更能明显的提示)
-#TODO - 尝试实现让ai总结对话标题(我的思路：从空对话开始用户发起对话时，发起两个请求，一个用来回复用户，另一个用来总结描述用户的问题来生成一个合适的对话标题，让回复用户的请求先运行)
-#FIX - 当窗口切换到streamlit外面(例如我在查看vscode代码)，streamlit没有渲染ai生成的回复(好像streamlit停止渲染了)
-# 添加会话记忆功能
-# 使用st.session_state设置一个messages列表来保存历史会话，每轮对话需要像里面append对话
-# 发送提示词则可以直接使用st.session_state
 
 #FIXME - BUG: 如果模型上一条对话还为发送完就发送下一条对话，会吧上一条对话给“遮掉”
 #FIXME - 将标题融在文件名里会出现下面情况：在标题未生成前就保存会话，save_dialogue之后出现旧的和新的两份会话文件，并且保存会话之后操作的还是旧的会话文件(st.session_state["current_history_file"]没改)，可能导致同一个会话重复保存不同名会话文件; 同时 current_history_file 也没有在保存后更新
-#将文件名在对话保存的时候就固定下来，在json中保存文件名，在加载侧边栏会话时读取json文件将文件名显示在按钮中
-
-#FIXME - BUG: 测试定时重跑函数，没有正确处理其他会话删除当前会话文件的情况
-#FIXME - 首轮会话生成标题速度可以忍受(好像第一次使用模型时有点慢，后面的还好)，要等将近两分钟才能加载出来助手生成的回复
 
 
-# 其他可选方案与难度：
-#     - 应用层延迟标题任务：容易实现
-#       聊天回复结束后不要立刻提交标题任务，先等待一段“用户空闲时间”；期间若用户继续发消息，就不生成标题
-#       缺点：标题任务一旦真正启动，后续聊天仍可能排队
-#     - 取消“第二次标题请求”：最推荐，也较容易✅✅✅
-#       让首轮聊天回复顺便带上标题，或直接由首条消息截取生成标题这样 Ollama 始终只处理聊天回复，不存在标题阻塞聊天的问题
-#     - 标题使用独立模型服务或云 API：实现中等
-#       标题和聊天走不同推理端，互不阻塞；但你当前 8G 显存不适合本地再常驻一个模型，云 API 则需要网络和密钥
-#     - 提高 Ollama 并发：不推荐
-#       理论上可尝试并行请求，但它不是优先级机制；8G 显存下更可能导致显存不足、上下文缩小或两边都变慢
-
-
-#     写一份首轮用来生成标题的提示词TITLE_GENERATE_PROMPT，在发起请求时判断当前轮次是否为第一轮，如果是则发起请求时使用 "SYSTEM_PROMPT_TEMPLATE + TITLE_GENERATE_PROMPT"，后续请求正常使用SYSTEM_PROMPT_TEMPLATE
-
+#build_api_messages主要是为了图片请求，因为现在messages列表的字典现在携带image_ids图片索引列表，该列表只给本地后段使用，给模型的是图片对应的base64编码(最新一条消息的，历史消息对应的图片一律给摘要)
+#TODO - 重构模型生成用来给程序解析元数据块的方案，重写提示词，重构解析逻辑，方案如下：
+# [[AGENT_META]]
+# {"title":"安装 Streamlit","images":[{"image_id":"img_001","summary":"VS Code 终端提示缺少 streamlit 模块","tags":["VS Code","Python","streamlit"],"ocr_text":"ModuleNotFoundError: No module named 'streamlit'"}]}
+# [[/AGENT_META]]
+# 正式回复内容...

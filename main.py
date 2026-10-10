@@ -96,10 +96,10 @@ DATA_DIR = Path(__file__).parent / "data"
 CHAT_CLIENT = openai.OpenAI(base_url=BASE_URL) # NOTE - 环境变量里设置了openai_api_key
 MAX_IMAGES_PER_MESSAGE = 4 #单个对话最多上传4张图片
 MAX_IMAGE_PIXELS = 1e8 # 最大支持一亿像素图片
-IMAGE_FORMAT_TO_MIME = {
-    "PNG": "image/png",
-    "JPEG": "image/jpeg",
-    "WEBP": "image/webp",
+IMAGE_FORMAT_TO_MIMEANDSUFFIX = {
+    "PNG": ["image/png", ".png"],
+    "JPEG": ["image/jpeg", ".jpg"],
+    "WEBP": ["image/webp", ".webp"]
 }
 
 
@@ -333,12 +333,12 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
                 image_file.verify() # 校验图片完整性
         except (UnidentifiedImageError, OSError): # 校验是否为图片
             raise ValueError(f"图片 {image_name} 无法正常读取")
-        if image_format not in IMAGE_FORMAT_TO_MIME: # 校验图片格式是否受支持
+        if image_format not in IMAGE_FORMAT_TO_MIMEANDSUFFIX: # 校验图片格式是否受支持
             raise ValueError(f"图片 {image_name} 格式为 {image_format}，不支持")
         checked_images.append({
-            "id": st.session_state["next_image_seq"],
-            "mime_type": IMAGE_FORMAT_TO_MIME[image_format],
-            "raw_bytes": image.getvalue()
+            "raw_bytes": image.getvalue(),
+            "mime_type": IMAGE_FORMAT_TO_MIMEANDSUFFIX[image_format][0],
+            "suffix": IMAGE_FORMAT_TO_MIMEANDSUFFIX[image_format][1]
         })
         st.session_state["next_image_seq"] += 1
 
@@ -349,11 +349,26 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
     image_ids = [] # 生成的图片id列表
 
     for checked_image in checked_images:
-        f"attachments/{st.session_state["session_id"]}/img_{st.session_state["next_image_seq"]:03d}.{image_format.lower()}" # 相对path的路径
+        image_id = f"img_{st.session_state['next_image_seq']:03d}"
+        saved_path = attachments_dir / f"{image_id}{checked_image["suffix"]}" # 需要保存的图片绝对路径
+        saved_path.write_bytes(checked_image["raw_bytes"]) # 保存图片到saved_path
+        st.session_state["images"][image_id] = {
+            "path": str(saved_path.relative_to(DATA_DIR)),
+            "mime_type": checked_image["mime_type"],
+            "summary": "",
+            "ocr_text": ""
+        }
+        image_ids.append(image_id)
+        st.session_state["next_image_seq"] += 1
 
+    return image_ids
 
-
-    return [""]  
+def check_last_image_error():
+    error = st.session_state.pop("last_rounderror", None)
+    if not error:
+        return
+    st.session_state["prompt"] = error["prompt"]
+    st.error(error["error_info"])
 
 
 def main():
@@ -392,20 +407,8 @@ def main():
     # 渲染在页面最底部
     with st.bottom:  # noqa: SIM117
         with st.container(border=True):
-            prompt_button_col, upload_image_col = st.columns([1, 3])
-            # 预填聊天框按钮
-            with prompt_button_col:
-                st.button(label="提示词例子", on_click=fill_prompt)
-            # 当前只负责接收图片；后续再将它编码并加入模型请求
-            with upload_image_col:
-                uploaded_image = st.file_uploader(
-                    label="上传图片",
-                    type=["png", "jpg", "jpeg", "webp"],
-                    key="uploaded_image",
-                    label_visibility="collapsed",
-                )
-            if uploaded_image:
-                st.caption(f"已选择图片：{uploaded_image.name}")
+            check_last_image_error() # 检查上一轮是否有图片异常错误(内部有填写st.session_state["prompt"]，必须放在chat_input渲染完成之前)
+            st.button(label="提示词例子", on_click=fill_prompt)
             # 聊天框
             user_input = st.chat_input(
                 placeholder="输入消息或者直接粘贴图片...",
@@ -429,15 +432,29 @@ def main():
     # 渲染用户提示词
     if user_input["text"]:
         st.chat_message(name="user").write(user_input["text"])
-    #TODO -  渲染用户提交的图片
+    
+    # 保存并渲染用户提交的图片
+    image_ids: list[str] = []
     if user_input.files:
-        for image in user_input.files:
-            st.image(user_input.files, caption=image.name)
+        try:
+            image_ids = save_uploaded_images(user_input.files)
+            for image in user_input.files:
+                st.image(user_input.files, caption=image.name)
+        except ValueError as e:
+            st.session_state["last_rounderror"] = {
+                "prompt": user_input["text"],
+                "error_info": str(e)
+            }
+            st.rerun()
+
     #TODO - 决定在上下文中如何处理图片
     st.session_state["messages"].append({
         "role": "user", 
         "content": user_input["text"]
     })
+    if image_ids:
+        st.session_state["messages"][-1]["images"] = image_ids
+
 
     temp_messages = deepcopy(st.session_state["messages"])#FIXME - 测试这里copy()是否修复了st.session_state["messages"][0]["content"]仍然携带标题生成提示次的bug
     temp_messages[0]["content"] += TITLE_GENERATE_PROMPT

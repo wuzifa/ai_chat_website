@@ -531,3 +531,41 @@ print(u.school)   # XX大学
 45.st.rerun()
 重新执行整个脚本，相当于立刻从头开始执行，上一轮rerun()后面的代码将没机会执行
 
+46.Base64
+Base64 是一种“把二进制数据写成普通文本字符串”的编码方式
+(1).在让模型处理图片类请求时，具体流程为:
+    (1).先在本机将图片转换为Base64编码的字符串
+    (2).在json请求中传递转换为字符串之后的图片: data:image/jpeg;base64,<图片对应的Base64字符串>
+    (3).服务端拿到Base64字符串之后再解码还原出图片字节，交给模型处理
+
+(2).典型应用
+    - 网页内嵌小图标
+      CSS、HTML 里可以直接写图片，不必额外请求一个 .png 文件
+      <img src="data:image/png;base64,iVBORw0KGgo...">
+      适合很小的图标；大图不适合
+    - 接口上传图片、音频、PDF
+      把图片转成 Base64，放入 JSON 请求体
+      例如 OCR 接口、AI 图片识别、身份证识别、语音识别接口
+    - 邮件附件
+      传统邮件主要是文本格式，附件通常通过 MIME + Base64 编码放进邮件内容中，收件客户端再还原成图片、压缩包或 PDF
+    - Token / 基础认证中的文本传递
+      HTTP Basic Auth 常把 用户名:密码 转成 Base64：
+      Authorization: Basic dXNlcjpwYXNz
+      但这只是编码，不安全；必须配合 HTTPS，不能把它当加密
+    一句话：Base64 是“把二进制塞进文本通道”的通用办法，但要付出约 33% 体积膨胀的代价
+
+
+47.st.chat_input如果支持上传文件，那么它的返回值就变成了ChatInputValue，具备text属性和files属性，可以使用.或者[]来访问
+其中files为UploadedFile对象列表
+
+48.streamlit的文件上传类型
+    - 继承关系:
+    Streamlit UploadedFile
+        └── Python BytesIO
+                └── 内存中的二进制文件对象
+    - 既有streamlit的补充信息:
+    image_file.name  # 原始文件名
+    image_file.type  # MIME 类型，例如 image/png
+    image_file.size  # 文件字节数
+    - 也有python文件类型的基础操作:
+    image_bytes = image_file.getvalue()

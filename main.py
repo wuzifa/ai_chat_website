@@ -294,15 +294,32 @@ def main():
     # 渲染在页面最底部
     with st.bottom:  # noqa: SIM117
         with st.container(border=True):
+            prompt_button_col, upload_image_col = st.columns([1, 3])
             # 预填聊天框按钮
-            st.button(label="提示词例子", on_click=fill_prompt)
+            with prompt_button_col:
+                st.button(label="提示词例子", on_click=fill_prompt)
+            # 当前只负责接收图片；后续再将它编码并加入模型请求
+            with upload_image_col:
+                uploaded_image = st.file_uploader(
+                    label="上传图片",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key="uploaded_image",
+                    label_visibility="collapsed",
+                )
+            if uploaded_image:
+                st.caption(f"已选择图片：{uploaded_image.name}")
             # 聊天框
-            prompt = st.chat_input(placeholder="随便说点什么...", key="prompt")
+            user_input = st.chat_input(
+                placeholder="输入消息或者直接粘贴图片...",
+                key="prompt",
+                accept_file="multiple",
+                file_type=["jpg", "jpeg", "png"]
+            )
 
     schedule_task() # 必须放在if not prompt前面调用，因为如果当前会话用户还从未填写过提示词，只是把这个会话加载出来，这个函数就不会被调用，也就不会注册这个fragment函数
 
     # 如果用户没有实际输入，下面的新一轮对话就不用渲染了
-    if not prompt:
+    if not user_input:
         return
 
     # 先判断是否为第一条用户消息 #NOTE - 也可以使用updated_at来判断是否为第一条消息
@@ -312,10 +329,16 @@ def main():
     )
 
     # 渲染用户提示词
-    st.chat_message(name="user").write(prompt)
+    if user_input["text"]:
+        st.chat_message(name="user").write(user_input["text"])
+    #TODO -  渲染用户提交的图片
+    if user_input.files:
+        for image in user_input.files:
+            st.image(user_input.files, caption=image.name)
+    #TODO - 决定在上下文中如何处理图片
     st.session_state["messages"].append({
         "role": "user", 
-        "content": prompt
+        "content": user_input["text"]
     })
 
     temp_messages = deepcopy(st.session_state["messages"])#FIXME - 测试这里copy()是否修复了st.session_state["messages"][0]["content"]仍然携带标题生成提示次的bug

@@ -656,3 +656,13 @@ LANCZOS	最慢	细节保留最好，缩小截图/文字通常效果好；极少�
 51.streamlit布局宽度规则
 子控件宽度受父控件宽度限制，不能超过父控件
 默认子控件尽量按照自身内容所占宽度正好够用显示，不会主动侵占空间
+
+52.python中base64库用法
+导入: import base64
+使用: 
+    (1).
+        base64.b64encode(<readblebuffer(字节)>) -> bytes
+        将原先二进制结果编码为base64字符串
+        为什么返回bytes二不是str: base64 的本质仍是“二进制数据转二进制数据”：它把任意字节转换成只包含 ASCII 字符对应字节的结果；函数不擅自决定是否将二进制数据按照ascii编码为字符串，方便直接继续写文件、传网络协议等二进制场景
+    (2).base64.b64encode(<readblebuffer | str (字符串/字节buffer)>) -> bytes
+        将base64字符串解码为原先的二进制字节

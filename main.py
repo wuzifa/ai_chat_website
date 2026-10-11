@@ -1,6 +1,6 @@
+import base64
 import json as js
 import uuid  # 生成会话唯一标识
-from copy import deepcopy
 from datetime import datetime
 from io import BytesIO
 from os import listdir, remove
@@ -37,27 +37,27 @@ SYSTEM_PROMPT_TEMPLATE = """
 你的性格：%s
 """
 
-IMAGE_PROMPT = """
-本轮请求包含图片，图片处理要求：
-1.上下文中的图片分为三类：
+IMAGE_PROMPT = r"""
+【历史图片目录，仅供摘要检索】
+%s
 
-(1). 图片目录
-其中只提供历史图片的编号与 summary，用于概括理解历史图片
-这些图片没有附带原图，不能据此推断像素级细节
+【本轮精确历史图片】
+%s
 
-(2). 精确历史图片
-这些是用户手动勾选后附带的历史原图，用于精确查看
-它们已经生成过图片记忆，只能用于回答当前问题，不要重复生成或修改其图片记忆
+【本轮新上传图片】
+%s
 
-(3). 本轮新上传图片
-这些是用户刚刚发送的原图
-请结合图片内容回答用户问题，并为每张新图片生成图片记忆
+说明：
+- “历史图片目录”列出当前会话所有已保存图片的记忆信息。
+- “本轮精确历史图片”会在本轮请求中附带原图，不要重复生成记忆卡。
+- “本轮新上传图片”会在本轮请求中附带原图，必须生成对应记忆卡。
+- 某个图片若同时出现在目录和“精确历史图片”中，以附带的原图为准。
 
-2.图片记忆生成规则：
+2.图片记忆卡生成规则：
 
-(1). 只为“本轮新上传图片”生成 AGENT_META.images 项
-(2). 每项必须使用对应图片的 image_id
-(3). summary：不超过 60 个汉字；概括图片主体、关键内容、可检索关键词和重要问题
+(1). 生成在 AGENT_META.images 项
+(2). 每张记忆卡的生成格式：<image_id>: {"summary": <summary>, "ocr_text": <ocr_text>}
+(3). summary：不超过 30 个汉字；概括图片主体、关键内容、可检索关键词和重要问题
 (4). ocr_text：仅提取清晰且重要的可见文字；没有则使用空字符串
 (5). 图片看不清或无法确认时，summary 中应说明不确定性；不要编造细节或 OCR 文字
 (6). 不要在正式回复中展示 AGENT_META、JSON 或内部图片编号，除非用户主动要求图片编号
@@ -67,7 +67,7 @@ AGENT_OPEN = "[[AGENT]]"
 AGENT_CLOSE = "[[/agent]]"
 TITLE_GENERATE_PROMPT = """
 本轮是新会话的第一轮回复
-请在 AGENT_META 的 title 字段中生成一个标题
+请在 AGENT_META.title 项中生成一个标题
 
 1.标题只概括用户问题主题
 2.不要在标题中使用引号、标点、序号或换行
@@ -159,7 +159,9 @@ def create_new_dialogue():
     st.session_state["dirty"] = False
     st.session_state["title"] = None
     st.session_state["selected_model"] = "qwen3-vl:8b"
-    st.session_state["image"] = {}
+    st.session_state["images"] = {}
+    st.session_state["selected_history_image_ids"] = []
+    st.session_state["next_image_seq"] = 1
 
 
 def save_dialogue():
@@ -315,8 +317,6 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
     Returns:
         list[str]: 该函数对于每个被保存的图片生成的id
     """
-    st.session_state.setdefault("next_image_seq", 0) # 下一个图片id
-
     if len(upload_files) > MAX_IMAGES_PER_MESSAGE:
         raise ValueError(f"单次最多上传 {MAX_IMAGES_PER_MESSAGE} 张图片")
 
@@ -355,8 +355,8 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
         st.session_state["images"][image_id] = {
             "path": str(saved_path.relative_to(DATA_DIR)),
             "mime_type": checked_image["mime_type"],
-            "summary": "",
-            "ocr_text": ""
+            "summary": "摘要尚未生成",
+            "ocr_text": "图片文字尚未识别"
         }
         image_ids.append(image_id)
         st.session_state["next_image_seq"] += 1
@@ -387,8 +387,146 @@ def render_image_checkboxs() -> None:
                     key=f"history_image_{id}"
                 )
                 st.caption(info["summary"])
-            if selected:
+            if selected: #TODO - 确保在每轮重跑之前清空复选框状态
                 st.session_state["selected_history_image_ids"].append(id)
+
+def build_image_catalogue() -> str:
+    """
+    构造所有已存在历史图片的摘要目录
+
+    Returns:
+        str: 历史图片摘要目录，格式：
+        - image_001：<summary>；OCR：{ocr_text}
+        - image_002：<summary>；OCR：{ocr_text}
+        ...
+    """
+    images = st.session_state.get("images", None)
+    if not images:
+        return "无"
+    lines: list[str] = []
+    for id, info in images.items():
+        summary = info["summary"].strip()
+        ocr_text = info["ocr_text"].strip()
+        lines.append(f"- {id}：{summary}；OCR：{ocr_text}")
+    return '\n'.join(lines)
+
+
+def build_image_context_prompt() -> str:
+    """
+    生成每轮动态图片提示词
+
+    历史图片目录会每轮发送；
+    勾选历史图和新上传图在请求体中会额外附带原图
+
+    Returns:
+        str: 动态图片提示词，格式见IMAGE_PROMPT
+    """
+    catalogue = build_image_catalogue()
+
+    selected_history_image_ids: list[str] = st.session_state.get("selected_history_image_ids", None)
+    selected_text: str = ("、".join(selected_history_image_ids) if selected_history_image_ids else "无")
+
+
+    new_image_ids: list[str] = st.session_state["messages"][-1]["uploaded_image_ids"]
+    new_text = "、".join(new_image_ids) if new_image_ids else "无"
+    return IMAGE_PROMPT % (catalogue, selected_text, new_text)
+
+
+def image_id_to_api_content(image_id: str) -> dict:
+    """
+    读取本地原图，临时转换为 OpenAI 兼容的 image_url 
+    
+    Args:
+        image_id (str): 图片id
+
+    Returns:
+        dict: 内容块字典
+        格式为:
+        {
+            "type": "image_url",
+            "image_url": "data:image/png;base64,<图片base64字符串>"
+        }
+    """
+    info = st.session_state["images"][image_id]
+    path: Path = DATA_DIR / info["path"]
+    if not path.is_file():
+        raise FileNotFoundError(f"找不到图片: {path}")
+    encoded_str = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {
+        "type": "image_url",
+        "image_url": f"data:{info['mime_type']};base64,{encoded_str}"
+    }
+
+
+def build_api_messages() -> list[dict]:
+    """
+    将内部会话消息st.session_state["messages"]重新组装为 OpenAI api 格式的消息
+    主要工作:
+        (1).生成图片相关提示词
+        (2).用户历史消息重新生成提示词(主要是st.session_state["messages"]列表项中两个图片相关字段)
+        (3).用户最新提示词涉及的图片组装content部分: 包含用户提示词，每张图片对应的图片说明(每张图片前面添加text类型说明这张图片对应的image_id)与每张图片对应的base64
+
+    Returns:
+        list[dict]: _description_
+    """
+    raw_messages = st.session_state["messages"]
+    #组装第一条系统提示词
+    sys_prompt_content = raw_messages[0]["content"] # 字符串不可变对象，不用copy()
+    if len(raw_messages) == 1: #是第一轮对话
+        sys_prompt_content += TITLE_GENERATE_PROMPT
+
+    # 组装图片相关提示词
+    api_messages: list[dict] = [ # 下面为前两条系统提示词: (1)ai名称，性格 (2)图片相关说明
+        {
+            "role": "system",
+            "content": sys_prompt_content,
+        },
+        {
+            "role": "system",
+            "content": build_image_context_prompt()
+        },
+    ]
+
+    now = 2
+    # 组装用户历史提示词/模型回复
+    for raw_message in raw_messages.items()[1::]:
+        role = raw_message["role"]
+        content = raw_message["content"]
+
+        # 模型消息直接放进api_messages然后进入下一轮消息组装
+        if role == "assistant":
+            api_messages.append({
+                "role": "assistant",
+                "content": content
+            })
+            continue
+
+        # 用户消息
+        all_images = raw_message["uploaded_image_ids"] + raw_message["user_selected_image_ids"]
+        if now != len(raw_messages) or all_images: # 非最新消息(or的意思是：最新没有图片也进入该分支)
+            if all_images:
+                content += "\n[本轮总共涉及需要详细查看的图片: " + '、'.join(all_images) + ']'
+            api_messages.append({
+                "role": "user",
+                "content": content
+            })
+            continue 
+        # 非最新用户消息到此处理完毕，下面为最新消息需要额外处理的部分
+
+        # 最新消息，组装content部分图片说明与base64字符串
+        content_parts: list[dict] = [{ # 对于图片请求需要的
+            "type": "text",
+            "text": content or "请描述这些图片"
+        }]
+        for image_id in all_images: # type: ignore
+            content_parts.append({"type": "text", "text": f"以下附带原图 {image_id}"}) # 添加原图说明(模型生成记忆卡时需要参考该图对应的id)
+            content_parts.append(image_id_to_api_content(image_id)) # 添加原图对应的 openai api content 块
+        api_messages.append({ # 向api_messages添加本轮请求对应的请求体
+            "role": "user",
+            "content": content_parts
+        })
+    return api_messages
+
 
 def main():
     # 界面基本设置
@@ -467,26 +605,22 @@ def main():
             }
             st.rerun()
 
-    #TODO - 决定在上下文中如何处理图片
+    
     st.session_state["messages"].append({
         "role": "user", 
-        "content": user_input["text"]
+        "content": user_input["text"],
+        "uploaded_image_ids": image_ids,
+        "user_selected_image_ids": st.session_state["selected_history_image_ids"]
     })
-    if image_ids:
-        st.session_state["messages"][-1]["images"] = image_ids
 
-
-    temp_messages = deepcopy(st.session_state["messages"])#FIXME - 测试这里copy()是否修复了st.session_state["messages"][0]["content"]仍然携带标题生成提示次的bug
-    temp_messages[0]["content"] += TITLE_GENERATE_PROMPT
-    title_res: list[str] = ["新对话"]
 
     # 调用大模型生成回答
     stream_response = CHAT_CLIENT.chat.completions.create(
         model=st.session_state["selected_model"],
-        messages=temp_messages if is_first_round else st.session_state["messages"],
+        messages=build_api_messages(), # type: ignore
         stream=True,
         timeout=180.0
-    )
+    ) # type: ignore
 
     stream_gen = first_reply_body_stream(stream_response, title_res) if is_first_round else (chunk.choices[0].delta.content or "" for chunk in stream_response) # 想要生成器对象还能“返回”标题生成结果，最方便的做法是传入一个可变对象title_res(list[str])
 
@@ -519,5 +653,14 @@ if __name__ == "__main__":
 #FIXME - 将标题融在文件名里会出现下面情况：在标题未生成前就保存会话，save_dialogue之后出现旧的和新的两份会话文件，并且保存会话之后操作的还是旧的会话文件(st.session_state["current_history_file"]没改)，可能导致同一个会话重复保存不同名会话文件; 同时 current_history_file 也没有在保存后更新
 
 
-#build_api_messages主要是为了图片请求，因为现在messages列表的字典现在携带image_ids图片索引列表，该列表只给本地后段使用，给模型的是图片对应的base64编码(最新一条消息的，历史消息对应的图片一律给摘要)
+# build_api_messages主要是为了图片请求，因为现在messages列表的字典现在携带image_ids图片索引列表，该列表只给本地后段使用，给模型的是图片对应的base64编码(最新一条消息的，历史消息对应的图片一律给摘要)
 # messages中现在既有正式的role, content，也有image_ids，image_ids是用户这轮上传的图片
+
+
+
+
+#TODO - 调用大模型生成回答前先检查session_state中是否有用户选择的历史图片，pop到messages中
+#TODO - 不能再直接把messages扔给模型，需要使用build_api_messages()函数读取messages中包含的图片相关字段，生成适合openai接口的提示词(包含合适的图片相关提示词)
+# 历史消息中包含的image_ids怎么处理：直接告诉模型图片id，这些id涉及的图片记忆卡应该在这轮交互发送之前已经生成好了
+# 本轮消息设计的三类图片：根据messages中具体包含哪些字段生成对应的提示词，没有这类图片就写“无”
+# 

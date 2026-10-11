@@ -89,12 +89,14 @@ NOTWIDGET_FIELDS = { # 应该保存到文件中的字段的白名单(非控件�
     "selected_model",
     "messages",
     "title",
-    "next_image_seq"
+    "next_image_seq",
+    "images",
 }
 DATA_DIR = Path(__file__).parent / "data"
 # 创建大模型客户端
 CHAT_CLIENT = openai.OpenAI(base_url=BASE_URL) # NOTE - 环境变量里设置了openai_api_key
 MAX_IMAGES_PER_MESSAGE = 4 #单个对话最多上传4张图片
+MAX_IMAGES_PER_SESSION = 20 #单会话最多20张图(主要是性能考量)
 MAX_IMAGE_PIXELS = 1e8 # 最大支持一亿像素图片
 IMAGE_FORMAT_TO_MIMEANDSUFFIX = {
     "PNG": ["image/png", ".png"],
@@ -238,6 +240,7 @@ def switch_dialogue(file: str):
     # 重置st.session_state中应取默认值的字段
     st.session_state.update(CHAT_DEFAULT_FIELD)
     st.session_state["current_history_file"] = file
+    st.session_state["selected_history_image_ids"] = [] # 保留清空旧会话的用户选择历史图片列表，防止未成功删除的情况(模型还没生成回答用户旧切换会话)
 
 def delete_dialogue(file: str):
     remove(DATA_DIR / file)
@@ -318,8 +321,11 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
     Returns:
         list[str]: 该函数对于每个被保存的图片生成的id
     """
+    existing_image_count = len(st.session_state["images"])
     if len(upload_files) > MAX_IMAGES_PER_MESSAGE:
         raise ValueError(f"单次最多上传 {MAX_IMAGES_PER_MESSAGE} 张图片")
+    if existing_image_count + len(upload_files) > MAX_IMAGES_PER_SESSION:
+        raise ValueError(f"单个会话最多上传 {MAX_IMAGES_PER_SESSION} 张图片")
 
     # 不采取：边一张一张校验同时保存到session_state，采取：全部校验完成之后一起保存到session_state；避免部分失败的情况
     checked_images = [] # 已校验图片
@@ -341,7 +347,6 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
             "mime_type": IMAGE_FORMAT_TO_MIMEANDSUFFIX[image_format][0],
             "suffix": IMAGE_FORMAT_TO_MIMEANDSUFFIX[image_format][1]
         })
-        st.session_state["next_image_seq"] += 1
 
     # 创建图片保存路径
     attachments_dir: Path = DATA_DIR / "attachments" / st.session_state["session_id"] # 图片保存绝对路径
@@ -357,7 +362,7 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
             "path": str(saved_path.relative_to(DATA_DIR)),
             "mime_type": checked_image["mime_type"],
             "summary": "摘要尚未生成",
-            "ocr_text": "图片文字尚未识别"
+            "ocr_text": ""
         }
         image_ids.append(image_id)
         st.session_state["next_image_seq"] += 1
@@ -377,19 +382,27 @@ def render_image_checkboxs() -> None:
     根据session_satte中保存的本轮涉及图片信息，为每幅图片渲染复选框(复选框与缩略图并排放置)，供用户选择本轮交互是否携带这张图
     会修改session_state，selected_history_image_ids(list[str])包含被选择的图片的id
     """
+    selected_ids: list[str] = []
+
     with st.sidebar.expander("历史图片"):
-        selected_col, image_col = st.columns([2, 1])
-        for id, info in st.session_state["images"].items():
+        if not st.session_state["images"]:
+            st.caption("当前会话还没有历史图片")
+
+        for image_id, info in st.session_state["images"].items():
+            image_col, selected_col = st.columns([1, 2])
             with image_col:
                 st.image(DATA_DIR/info["path"], width=100)
             with selected_col:
                 selected = st.checkbox(
-                    label=id,
-                    key=f"history_image_{id}"
+                    label=image_id,
+                    key=f"history_image_{st.session_state['session_id']}_{image_id}"
                 )
                 st.caption(info["summary"])
-            if selected: #TODO - 确保在每轮重跑之前清空复选框状态
-                st.session_state["selected_history_image_ids"].append(id)
+            if selected:
+                selected_ids.append(image_id)
+
+    # 直接赋值到session_state["selected_history_image_ids"]而不是append，追加不符合逻辑！！
+    st.session_state["selected_history_image_ids"] = selected_ids
 
 def build_image_catalogue() -> str:
     """
@@ -539,7 +552,7 @@ def clear_history_image_selection_if_needed() -> None:
         return
 
     for key in list(st.session_state.keys()):
-        if key.startswith("history_image_"): # type: ignore
+        if isinstance(key, str) and key.startswith("history_image_"):
             st.session_state[key] = False # 设置全部复选框为取消状态
 
     st.session_state["selected_history_image_ids"] = []
@@ -557,6 +570,9 @@ def main():
     # 第一次进入网页/刷新时创建一个新会话
     if "session_id" not in st.session_state:
         create_new_dialogue()
+
+    # 必须在 st.checkbox 创建前清空，才能安全重置勾选状态。
+    clear_history_image_selection_if_needed()
 
     # 侧边栏
     with st.sidebar:
@@ -609,7 +625,7 @@ def main():
         try:
             image_ids = save_uploaded_images(user_input.files)
             for image in user_input.files:
-                st.image(user_input.files, caption=image.name)
+                st.image(image, caption=image.name)
         except ValueError as e:
             st.session_state["last_rounderror"] = {
                 "prompt": user_input["text"],
@@ -622,7 +638,7 @@ def main():
         "role": "user", 
         "content": user_input["text"],
         "uploaded_image_ids": image_ids,
-        "user_selected_image_ids": st.session_state["selected_history_image_ids"]
+        "user_selected_image_ids": st.session_state["selected_history_image_ids"].copy() #这里使用拷贝而不是直接赋值是因为list是可变对象，直接赋值之后修改st.session_state["selected_history_image_ids"](每轮交互结束后清空)相当于一起修改了这条消息的user_selected_image_ids，不符合逻辑
     })
 
 
@@ -674,4 +690,4 @@ if __name__ == "__main__":
 #TODO - 不能再直接把messages扔给模型，需要使用build_api_messages()函数读取messages中包含的图片相关字段，生成适合openai接口的提示词(包含合适的图片相关提示词)
 # 历史消息中包含的image_ids怎么处理：直接告诉模型图片id，这些id涉及的图片记忆卡应该在这轮交互发送之前已经生成好了
 # 本轮消息设计的三类图片：根据messages中具体包含哪些字段生成对应的提示词，没有这类图片就写“无”
-# 
+#

@@ -511,6 +511,10 @@ as_completed()函数：
       print(b[0] is b[1])  # True
       print(b[0] is child) # False
 
+    - 拷贝的另一种写法:
+    假设a为list对象，此时: b = list(a)意识为
+    根据 a 里的元素，创建一个新的 list 对象，然后赋给b
+
 44.python类对象
 class User:
     pass

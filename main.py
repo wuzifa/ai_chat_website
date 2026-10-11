@@ -368,8 +368,27 @@ def check_last_image_error():
     if not error:
         return
     st.session_state["prompt"] = error["prompt"]
-    st.error(error["error_info"])
+    st.error(body=error["error_info"], icon='🚨')
 
+def render_image_checkboxs() -> None:
+    """
+    渲染侧边栏复选框
+    根据session_satte中保存的本轮涉及图片信息，为每幅图片渲染复选框(复选框与缩略图并排放置)，供用户选择本轮交互是否携带这张图
+    会修改session_state，selected_history_image_ids(list[str])包含被选择的图片的id
+    """
+    with st.sidebar.expander("历史图片"):
+        selected_col, image_col = st.columns([2, 1])
+        for id, info in st.session_state["images"].items():
+            with image_col:
+                st.image(DATA_DIR/info["path"], width=100)
+            with selected_col:
+                selected = st.checkbox(
+                    label=id,
+                    key=f"history_image_{id}"
+                )
+                st.caption(info["summary"])
+            if selected:
+                st.session_state["selected_history_image_ids"].append(id)
 
 def main():
     # 界面基本设置
@@ -389,14 +408,15 @@ def main():
         st.subheader("会话管理")
         st.button("新建会话", icon=NEW_CHAT_ICON, width="stretch", on_click=on_create_new_clicked)
         load_session_names()
-
         st.divider()
 
         st.subheader("伴侣信息")
         st.text_input(label="伴侣姓名", key="name")
         st.text_area(label="伴侣性格", key="character")
-
         st.button("确定", on_click=set_sysprompt)
+        st.divider()
+
+        render_image_checkboxs() # 渲染历史图片复选框
 
 
     # 渲染历史聊天记录
@@ -500,8 +520,4 @@ if __name__ == "__main__":
 
 
 #build_api_messages主要是为了图片请求，因为现在messages列表的字典现在携带image_ids图片索引列表，该列表只给本地后段使用，给模型的是图片对应的base64编码(最新一条消息的，历史消息对应的图片一律给摘要)
-#TODO - 重构模型生成用来给程序解析元数据块的方案，重写提示词，重构解析逻辑，方案如下：
-# [[AGENT_META]]
-# {"title":"安装 Streamlit","images":[{"image_id":"img_001","summary":"VS Code 终端提示缺少 streamlit 模块","tags":["VS Code","Python","streamlit"],"ocr_text":"ModuleNotFoundError: No module named 'streamlit'"}]}
-# [[/AGENT_META]]
-# 正式回复内容...
+# messages中现在既有正式的role, content，也有image_ids，image_ids是用户这轮上传的图片

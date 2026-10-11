@@ -149,6 +149,7 @@ def create_new_dialogue():
     只做：新建一个默认会话，重置所有session_state状态
     """
     # 重置会话状态
+    st.session_state = {}
     st.session_state["name"] = DEFAULT_MODEL_NAME
     st.session_state["character"] = DEFAULT_MODEL_CHARACTER
     st.session_state["messages"] = [{"role": "system", "content": SYSTEM_PROMPT_TEMPLATE % (DEFAULT_MODEL_NAME, DEFAULT_MODEL_CHARACTER)}]
@@ -528,6 +529,22 @@ def build_api_messages() -> list[dict]:
     return api_messages
 
 
+def clear_history_image_selection_if_needed() -> None:
+    """
+    在复选框创建前，清理上一轮发送成功后遗留的勾选状态
+    """
+    should_clear = st.session_state.pop("should_clear_history_image_selection", False) # 这句有三个含有: (1)取出清除标记 (2)如果有清除标记, pop()会删掉清楚标记 (3)如果没有清楚标记，默认不清除
+
+    if not should_clear:
+        return
+
+    for key in list(st.session_state.keys()):
+        if key.startswith("history_image_"): # type: ignore
+            st.session_state[key] = False # 设置全部复选框为取消状态
+
+    st.session_state["selected_history_image_ids"] = []
+
+
 def main():
     # 界面基本设置
     st.logo(LOGO, icon_image=LOGO)
@@ -581,11 +598,6 @@ def main():
     if not user_input:
         return
 
-    # 先判断是否为第一条用户消息 #NOTE - 也可以使用updated_at来判断是否为第一条消息
-    is_first_round = not any(
-        message["role"] == "user"
-        for message in st.session_state["messages"]
-    )
 
     # 渲染用户提示词
     if user_input["text"]:
@@ -636,10 +648,9 @@ def main():
     st.session_state["updated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["dirty"] = True
 
-    if is_first_round:
-        st.session_state["title"] = title_res[0]
-
     save_dialogue()
+    st.session_state["should_clear_history_image_selection"] = True
+    st.rerun() # 不会不停重新跑，因为前面有if not user_input: return这句入贵没有提示词会提前退出
 
 
 

@@ -670,3 +670,23 @@ LANCZOS	最慢	细节保留最好，缩小截图/文字通常效果好；极少�
         为什么返回bytes二不是str: base64 的本质仍是“二进制数据转二进制数据”：它把任意字节转换成只包含 ASCII 字符对应字节的结果；函数不擅自决定是否将二进制数据按照ascii编码为字符串，方便直接继续写文件、传网络协议等二进制场景
     (2).base64.b64encode(<readblebuffer | str (字符串/字节buffer)>) -> bytes
         将base64字符串解码为原先的二进制字节
+
+53.计算一个可迭代对象 l 中某个条件为True的次数
+sum(<对象应满足的条件> for 对象 in l)
+<对象应满足的条件>为返回bool的表达式，True为1，False为0，sum()里面的为生成器表达式，返回一个全为1/0的列表
+
+54.dict.fromkeys()
+字典的keys不能重复，重复会覆盖前面的旧值
+
+dict.fromkeys() 用一批 key 快速创建字典，并给它们统一设置初始值
+常见用途：给一组统计项、配置项或状态项做初始化
+result = dict.fromkeys(["PASS", "FAIL", "ERROR"], 0)  # {'PASS': 0, 'FAIL': 0, 'ERROR': 0}
+
+注意：如果初始值是可变对象（如 []、{}），所有 key 会共享同一个对象
+data = dict.fromkeys(["a", "b"], [])
+data["a"].append(1)
+print(data)
+# {'a': [1], 'b': [1]}  # b 也变了
+
+这种情况建议用字典推导式：
+data = {key: [] for key in ["a", "b"]} # key从["a", "b"]里面取，每个key的value为空列表

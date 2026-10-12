@@ -56,7 +56,8 @@ IMAGE_PROMPT = r"""
 2.图片记忆卡生成规则：
 
 (1). 生成在 AGENT_META.images 项
-(2). 每张记忆卡的生成格式：<image_id>: {"summary": <summary>, "ocr_text": <ocr_text>}
+(2). 每张记忆卡的格式：
+    {"image_id": "img_001", "summary": "图片摘要", "ocr_text": "关键文字"}
 (3). summary：不超过 30 个汉字；概括图片主体、关键内容、可检索关键词和重要问题
 (4). ocr_text：仅提取清晰且重要的可见文字；没有则使用空字符串
 (5). 图片看不清或无法确认时，summary 中应说明不确定性；不要编造细节或 OCR 文字
@@ -437,11 +438,12 @@ def build_image_context_prompt() -> str:
     """
     catalogue = build_image_catalogue()
 
-    selected_history_image_ids: list[str] = st.session_state.get("selected_history_image_ids", None)
+    latest_user_message = st.session_state["messages"][-1] # 从最新用户消息生成提示词
+    # 用户选择的历史图片
+    selected_history_image_ids: list[str] = latest_user_message["user_selected_image_ids"]
     selected_text: str = ("、".join(selected_history_image_ids) if selected_history_image_ids else "无")
-
-
-    new_image_ids: list[str] = st.session_state["messages"][-1]["uploaded_image_ids"]
+    # 用户这轮新上传的图片
+    new_image_ids: list[str] = latest_user_message["uploaded_image_ids"]
     new_text = "、".join(new_image_ids) if new_image_ids else "无"
     return IMAGE_PROMPT % (catalogue, selected_text, new_text)
 
@@ -486,7 +488,7 @@ def build_api_messages() -> list[dict]:
     raw_messages = st.session_state["messages"]
     #组装第一条系统提示词
     sys_prompt_content = raw_messages[0]["content"] # 字符串不可变对象，不用copy()
-    if len(raw_messages) == 1: #是第一轮对话
+    if sum(message["role"] == "user" for message in raw_messages) == 1: # 如果原始消息列表中只有一条用户消息，则为第一条用户消息
         sys_prompt_content += TITLE_GENERATE_PROMPT
 
     # 组装图片相关提示词
@@ -501,9 +503,11 @@ def build_api_messages() -> list[dict]:
         },
     ]
 
-    now = 2
+    now = 2 # raw_messages[1] 对应第一条用户消息，其位置号为 2
     # 组装用户历史提示词/模型回复
-    for raw_message in raw_messages.items()[1::]:
+    for raw_message in raw_messages[1::]:
+        is_latest_message = now == len(raw_messages)
+        now += 1
         role = raw_message["role"]
         content = raw_message["content"]
 
@@ -515,25 +519,50 @@ def build_api_messages() -> list[dict]:
             })
             continue
 
-        # 用户消息
-        all_images = raw_message["uploaded_image_ids"] + raw_message["user_selected_image_ids"]
-        if now != len(raw_messages) or all_images: # 非最新消息(or的意思是：最新没有图片也进入该分支)
+        # 用户消息(这里区分历史图片与本轮上传图片，方便后面对每张图片说明是历史图片不生成记忆卡 还是 新图片需要生成记忆卡)
+        uploaded_image_ids = raw_message["uploaded_image_ids"]
+        selected_image_ids = raw_message["user_selected_image_ids"]
+        all_images = list(dict.fromkeys(uploaded_image_ids + selected_image_ids))
+
+        # 历史消息，或最新但未附带原图的消息，只发送文字和关联图片 ID。
+        if not is_latest_message or not all_images:
             if all_images:
                 content += "\n[本轮总共涉及需要详细查看的图片: " + '、'.join(all_images) + ']'
             api_messages.append({
                 "role": "user",
                 "content": content
             })
-            continue 
-        # 非最新用户消息到此处理完毕，下面为最新消息需要额外处理的部分
+            continue
+        # 非最新用户消息/不带图的最新消息到此处理完毕，下面为带图最新消息的逻辑
 
         # 最新消息，组装content部分图片说明与base64字符串
         content_parts: list[dict] = [{ # 对于图片请求需要的
             "type": "text",
             "text": content or "请描述这些图片"
         }]
-        for image_id in all_images: # type: ignore
-            content_parts.append({"type": "text", "text": f"以下附带原图 {image_id}"}) # 添加原图说明(模型生成记忆卡时需要参考该图对应的id)
+
+
+        # 下面在append(image_id_to_api_content())之前携带每张原图前紧挨对应的 image_id 说明，模型才能建立图片与内部编号的映射
+
+        # 历史图片
+        for image_id in selected_image_ids:
+            content_parts.append({
+                "type": "text",
+                "text": (
+                    f"【以下附带原图对应历史图片 {image_id}】"
+                    "仅用于本轮精确回答，不要重新生成图片记忆卡。"
+                )
+            })
+            content_parts.append(image_id_to_api_content(image_id))
+        # 本轮上传图片
+        for image_id in uploaded_image_ids:
+            content_parts.append({
+                "type": "text",
+                "text": (
+                    f"【以下附带原图对应本轮新上传图片 {image_id}】"
+                    "请为该图片生成图片记忆卡。"
+                )
+            })
             content_parts.append(image_id_to_api_content(image_id)) # 添加原图对应的 openai api content 块
         api_messages.append({ # 向api_messages添加本轮请求对应的请求体
             "role": "user",

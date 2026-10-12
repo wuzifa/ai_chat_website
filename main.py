@@ -48,10 +48,10 @@ IMAGE_PROMPT = r"""
 %s
 
 说明：
-- “历史图片目录”列出当前会话所有已保存图片的记忆信息。
-- “本轮精确历史图片”会在本轮请求中附带原图，不要重复生成记忆卡。
-- “本轮新上传图片”会在本轮请求中附带原图，必须生成对应记忆卡。
-- 某个图片若同时出现在目录和“精确历史图片”中，以附带的原图为准。
+- “历史图片目录”列出当前会话所有已保存图片的记忆信息
+- “本轮精确历史图片”会在本轮请求中附带原图，不要重复生成记忆卡
+- “本轮新上传图片”会在本轮请求中附带原图，必须生成对应记忆卡
+- 某个图片若同时出现在目录和“精确历史图片”中，以附带的原图为准
 
 2.图片记忆卡生成规则：
 
@@ -118,7 +118,7 @@ def apply_agent_meta(agent_meta: object) -> None:
         return
 
     title = agent_meta.get("title")
-    # 如果当前会话没有标题才保存标题，避免模型误生成标题。
+    # 如果当前会话没有标题才保存标题，避免模型误生成标题
     if st.session_state["title"] is None:
         if isinstance(title, str):
             st.session_state["title"] = title.replace("\n", " ").strip()[:12] or "新对话"
@@ -156,22 +156,39 @@ def apply_agent_meta(agent_meta: object) -> None:
         st.session_state["images"][image_id]["ocr_text"] = ocr_text.strip()
 
 
-def parse_agent_response_stream(stream):
+def extract_content_stream(stream):
     """
-    解析模型的流式回复，隐藏 AGENT_META，只将正式回复交给聊天界面。
+    从模型原始流中提取思考内容和正式回复内容
 
     Args:
-        stream (流): 模型返回的流
+        stream (流): 模型返回的原始流
+    """
+    for chunk in stream:
+        delta = chunk.choices[0].delta
+        # 拆除推理思考字段
+        reasoning_content = getattr(delta, "reasoning", None) # 防止reasoning字段不存在，安全获取对象的推理字段
+        if isinstance(reasoning_content, str) and reasoning_content:
+            st.session_state["current_reasoning"] += reasoning_content # session_state["current_reasoning"]为模型目前为止积累的思考内容
+
+    # 拆出正文字段
+        content = delta.content
+        if isinstance(content, str) and content:
+            yield content
+
+
+def parse_agent_response_stream(content_stream):
+    """
+    解析模型的流式回复，隐藏 AGENT_META，只将正式回复交给聊天界面
+
+    Args:
+        content_stream (流): 只包含模型正式回复文本的流
     """
     meta_finished = False # 是否已经解析到完整元数据
     buffer = "" # 从stream已经接收到的字符集合
     st.session_state.pop("agent_meta_error", None)
 
-    for chunk in stream:
-        content = chunk.choices[0].delta.content
-        if not content:
-            continue
-
+    for content in content_stream:
+        # 没有检查content非空，因为extract_content_stream已经检查过了
         # 解析完元数据之后就是正式回复，直接返回正式回复
         if meta_finished:
             yield content
@@ -270,6 +287,8 @@ def set_sysprompt():
     用户摁下侧边栏ai特点设置确认按钮之后设置系统提示词
     """
     st.session_state["messages"][0]["content"] = SYSTEM_PROMPT_TEMPLATE % (st.session_state["name"], st.session_state["character"])
+    st.session_state["dirty"] = True # 保存会话提示词之后也算会话脏了，需要保存会话
+    st.session_state["sysprompt_saved"] = True
 
 def fill_prompt():
     """
@@ -591,7 +610,7 @@ def build_api_messages() -> list[dict]:
         selected_image_ids = raw_message["user_selected_image_ids"]
         all_images = list(dict.fromkeys(uploaded_image_ids + selected_image_ids))
 
-        # 历史消息，或最新但未附带原图的消息，只发送文字和关联图片 ID。
+        # 历史消息，或最新但未附带原图的消息，只发送文字和关联图片 ID
         if not is_latest_message or not all_images:
             if all_images:
                 content += "\n[本轮总共涉及需要详细查看的图片: " + '、'.join(all_images) + ']'
@@ -617,7 +636,7 @@ def build_api_messages() -> list[dict]:
                 "type": "text",
                 "text": (
                     f"【以下附带原图对应历史图片 {image_id}】"
-                    "仅用于本轮精确回答，不要重新生成图片记忆卡。"
+                    "仅用于本轮精确回答，不要重新生成图片记忆卡"
                 )
             })
             content_parts.append(image_id_to_api_content(image_id))
@@ -627,7 +646,7 @@ def build_api_messages() -> list[dict]:
                 "type": "text",
                 "text": (
                     f"【以下附带原图对应本轮新上传图片 {image_id}】"
-                    "请为该图片生成图片记忆卡。"
+                    "请为该图片生成图片记忆卡"
                 )
             })
             content_parts.append(image_id_to_api_content(image_id)) # 添加原图对应的 openai api content 块
@@ -661,13 +680,14 @@ def main():
                        page_icon="💬",
                        layout="wide")
     st.title("AI聊天伴侣")
-    #TODO - 添加当前会话名称
 
     # 第一次进入网页/刷新时创建一个新会话
     if "session_id" not in st.session_state:
         create_new_dialogue()
 
-    # 必须在 st.checkbox 创建前清空，才能安全重置勾选状态。
+    st.caption(f"当前会话：{st.session_state['title'] or '新对话'}")
+
+    # 必须在 st.checkbox 创建前清空，才能安全重置勾选状态
     clear_history_image_selection_if_needed()
 
     # 侧边栏
@@ -681,6 +701,8 @@ def main():
         st.text_input(label="伴侣姓名", key="name")
         st.text_area(label="伴侣性格", key="character")
         st.button("确定", on_click=set_sysprompt)
+        if st.session_state.pop("sysprompt_saved", False):
+            st.markdown("**✅ 已应用伴侣信息**") #AGENT - 有没有类似弹窗的那种效果，弹窗提示应用成功，过会弹窗自消失
         st.divider()
 
         render_image_checkboxs() # 渲染历史图片复选框
@@ -689,6 +711,16 @@ def main():
     # 渲染历史聊天记录
     for message in st.session_state["messages"][1::]:
         with st.chat_message(name=message["role"]):
+            # 先逐张渲染用户上传的图片
+            if message["role"] == "user":
+                for image_id in message["uploaded_image_ids"]:
+                    image_info = st.session_state["images"][image_id]
+                    image_path = DATA_DIR / image_info["path"]
+                    if image_path.is_file():
+                        st.image(image_path, width=150)
+                    else:
+                        st.warning(f"图片 {image_id} 的原文件不存在")
+            # 再渲染用户提示词
             st.markdown(message["content"])
 
     # 渲染在页面最底部
@@ -710,24 +742,24 @@ def main():
     if not user_input:
         return
 
-
-    # 渲染用户提示词
-    if user_input["text"]:
-        st.chat_message(name="user").write(user_input["text"])
-    
-    # 保存并渲染用户提交的图片
+    # 保存用户提交的图片
     image_ids: list[str] = []
     if user_input.files:
         try:
-            image_ids = save_uploaded_images(user_input.files)
-            for image in user_input.files:
-                st.image(image, caption=image.name)
+            image_ids = save_uploaded_images(user_input.files) # 内部保存并校验用户上传的图片，校验失败会抛出异常，进入异常捕获分支直接rerun()，不会进入下面渲染用户本轮消息的脚本
         except ValueError as e:
             st.session_state["last_rounderror"] = {
                 "prompt": user_input["text"],
                 "error_info": str(e)
             }
             st.rerun()
+
+    # 渲染用户本轮消息用户文字和图片放在同一个聊天消息区域内渲染
+    with st.chat_message(name="user"):
+        if user_input["text"]:
+            st.write(user_input["text"])
+        for image in user_input.files:
+            st.image(image, width=150)
 
     
     st.session_state["messages"].append({
@@ -738,6 +770,7 @@ def main():
     })
 
     # 调用大模型生成回答
+    st.session_state["current_reasoning"] = "" # 接收模型生成的回复钱先清空上一轮的思考内容
     stream_response = CHAT_CLIENT.chat.completions.create(
         model=st.session_state["selected_model"],
         messages=build_api_messages(), # type: ignore
@@ -745,7 +778,9 @@ def main():
         timeout=180.0
     ) # type: ignore
 
-    stream_gen = parse_agent_response_stream(stream_response)
+    # 获取两个流生成器对象(还未启动流): 模型思考过程和正文回复
+    content_stream = extract_content_stream(stream_response)
+    stream_gen = parse_agent_response_stream(content_stream)
 
     # 流式输出大模型的回复
     with st.chat_message(name="assistant"):
@@ -753,7 +788,7 @@ def main():
 
     agent_meta_error = st.session_state.pop("agent_meta_error", None)
     if agent_meta_error:
-        st.warning(f"{agent_meta_error}，本轮图片记忆可能未保存。")
+        st.warning(f"{agent_meta_error}，本轮图片记忆可能未保存")
 
     # 将ai生成的回复也添加到messages历史消息列表中
     st.session_state["messages"].append({
@@ -772,9 +807,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-#TODO - 用户界面不显示当前模型正在思考的内容，但是在apifox里面可以看到流式完整思考过程，用户体验很不好，我希望像codex app，可以显示思考过程，并且是一个下拉框，用户可以点击选择是否显示思考内容
-#TODO - 点击确定按钮更改ai性格成功之后应该给个提示，否则用户不知道是否应用成功  (总是忘记设置点击确定，应该有个更能明显的提示)
-
 #FIXME - BUG: 如果模型上一条对话还为发送完就发送下一条对话，会吧上一条对话给“遮掉”
 #FIXME - 将标题融在文件名里会出现下面情况：在标题未生成前就保存会话，save_dialogue之后出现旧的和新的两份会话文件，并且保存会话之后操作的还是旧的会话文件(st.session_state["current_history_file"]没改)，可能导致同一个会话重复保存不同名会话文件; 同时 current_history_file 也没有在保存后更新
 
@@ -789,4 +821,3 @@ if __name__ == "__main__":
 #TODO - 不能再直接把messages扔给模型，需要使用build_api_messages()函数读取messages中包含的图片相关字段，生成适合openai接口的提示词(包含合适的图片相关提示词)
 # 历史消息中包含的image_ids怎么处理：直接告诉模型图片id，这些id涉及的图片记忆卡应该在这轮交互发送之前已经生成好了
 # 本轮消息设计的三类图片：根据messages中具体包含哪些字段生成对应的提示词，没有这类图片就写“无”
-#

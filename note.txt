@@ -690,3 +690,27 @@ print(data)
 
 这种情况建议用字典推导式：
 data = {key: [] for key in ["a", "b"]} # key从["a", "b"]里面取，每个key的value为空列表
+
+55.object类
+object 是 Python 所有类的共同“最顶层父类”，Python 3 中，所有自定义类默认都继承 object
+它带来的基础能力包括：
+- __str__()：print(对象) 时如何显示
+- __repr__()：调试时对象如何显示
+- __eq__()：两个对象用 == 怎么比较
+- __init__()：创建对象时初始化
+- __class__：查看对象所属的类
+
+当写在类型注解里，object 表示：这个参数可以接收任意 Python 对象，给类型检查工具和读代码的人看：函数不要求参数必须是 str、int、列表等某种具体类型
+与 Any 的区别：
+Any 相当于“别检查我”，object 相当于只能安全地使用所有对象都有的基础操作，例如下面:
+def f1(value: object):
+    value.upper()  # 类型检查通常会报错：object 不保证有 upper()
+
+56.js.load/loads()返回值
+返回的是对应 JSON 类型转换后的 Python 对象，不一定是 dict：
+- JSON 对象 {...} → dict
+- JSON 数组 [...] → list
+- JSON 字符串 "abc" → str
+- JSON 数字 123 → int
+- JSON true / false → True / False
+- JSON null → None

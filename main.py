@@ -64,8 +64,8 @@ IMAGE_PROMPT = r"""
 (6). 不要在正式回复中展示 AGENT_META、JSON 或内部图片编号，除非用户主动要求图片编号
 """
 
-AGENT_OPEN = "[[AGENT]]"
-AGENT_CLOSE = "[[/agent]]"
+AGENT_META_OPEN = "[[AGENT_META]]"
+AGENT_META_CLOSE = "[[/AGENT_META]]"
 TITLE_GENERATE_PROMPT = """
 本轮是新会话的第一轮回复
 请在 AGENT_META.title 项中生成一个标题
@@ -105,45 +105,112 @@ IMAGE_FORMAT_TO_MIMEANDSUFFIX = {
     "WEBP": ["image/webp", ".webp"]
 }
 
-
-def first_reply_body_stream(stream, title_result: list[str]):
+def apply_agent_meta(agent_meta: object) -> None:
     """
-    解析首轮模型的流式回复
+    校验并保存模型返回的 AGENT_META
+    只接受本轮新上传图片的记忆卡，模型不能修改历史图片记忆(忽略)
+
+    Args:
+        agent_meta (object): 模型生成的回复元数据，object类型表示接受任意对象，可以为模型生成的元数据格式定义一个专属类，这里没定义
+    """
+    if not isinstance(agent_meta, dict):
+        st.session_state["agent_meta_error"] = "模型返回的元数据不是 JSON 对象"
+        return
+
+    title = agent_meta.get("title")
+    # 如果当前会话没有标题才保存标题，避免模型误生成标题。
+    if st.session_state["title"] is None:
+        if isinstance(title, str):
+            st.session_state["title"] = title.replace("\n", " ").strip()[:12] or "新对话"
+        else:
+            st.session_state["title"] = "新对话"
+
+    image_metas = agent_meta.get("images", [])
+    if not isinstance(image_metas, list):
+        st.session_state["agent_meta_error"] = "模型返回的图片记忆格式不正确"
+        return
+
+    latest_user_message = st.session_state["messages"][-1]
+    uploaded_image_ids = latest_user_message["uploaded_image_ids"]
+
+    # 某一条image元数据不是dict时直接忽略
+    for image_meta in image_metas:
+        if not isinstance(image_meta, dict):
+            continue
+
+        image_id = image_meta.get("image_id")
+        summary = image_meta.get("summary")
+        ocr_text = image_meta.get("ocr_text", "")
+
+        # 校验是否有不是用户上传的图片id，摘要和ocr文字是否为str类型
+        if (
+            not isinstance(image_id, str)
+            or image_id not in uploaded_image_ids
+            or not isinstance(summary, str)
+            or not summary.strip()
+            or not isinstance(ocr_text, str)
+        ):
+            continue
+
+        st.session_state["images"][image_id]["summary"] = summary.strip()[:30] # 只保存前30个字，后面的截掉
+        st.session_state["images"][image_id]["ocr_text"] = ocr_text.strip()
+
+
+def parse_agent_response_stream(stream):
+    """
+    解析模型的流式回复，隐藏 AGENT_META，只将正式回复交给聊天界面。
 
     Args:
         stream (流): 模型返回的流
-        title_result (list[str]): 传出参数，用来记录标题是否成功生成以及标题结果
     """
-    title_parsed = False # 是否已经解析到完整标题
-    buffer = "" # 目前为止当前模型已经生成的字符串回复
-    # 遍历模型返回的流
-    for chunk in stream: # for循环中的continue语句
+    meta_finished = False # 是否已经解析到完整元数据
+    buffer = "" # 从stream已经接收到的字符集合
+    st.session_state.pop("agent_meta_error", None)
+
+    for chunk in stream:
         content = chunk.choices[0].delta.content
-        if not content: # 如果模型输出空白，跳过这一个chunk
+        if not content:
             continue
-        if title_parsed: # 如果标题已经解析出来了，后面的就都是回复正文，直接返回这个chunk，并直接continue读取下一个chunk
+
+        # 解析完元数据之后就是正式回复，直接返回正式回复
+        if meta_finished:
             yield content
             continue
-        # 还没解析出完整标题就会执行到这里，此时直接把content加入buffer，然后判断是否出现完整标题
-        buffer += content.strip()
-        if buffer.startswith(TITLE_OPEN):
-            title_end = buffer.find(TITLE_CLOSE)
-            if title_end != -1: # 如果找到了标题开始标志也找到了标题结束标志
-                title_parsed = True
-                title_result[0] = buffer[len(TITLE_OPEN):title_end].replace('\n', ' ').strip()[:12] or "新标题" # 取出标题并过滤处理
-                remain_body = buffer[title_end + len(TITLE_CLOSE):] #一个chunk可能同时包含标题结束标志和正文，需要拿走剩下的正文部分
-                if remain_body:
-                    yield remain_body
-                    continue # 防止极端情况标题加上一小段正文正好超出下面的边界长度
-        if len(buffer) >= 128: # >=128长度还是没有找到完整标题，直接把所有内容全部扔(yield)给聊天，并清空buffer，因为后续肯定走if len(buffer) >= 128分支，并yield buffer，那么需要先把前面已经yield掉的部分清空
-            title_result[0] = "新对话"
-            title_parsed = False
+
+        buffer += content # 累加当前chunk到buffer
+
+        # 开始标记可能被拆到多个 chunk，确认不是其前缀后才能把内容当作正文输出
+        if not buffer.startswith(AGENT_META_OPEN): # 如果当前buffer开头没有完整AGENT_META_OPEN
+            if AGENT_META_OPEN.startswith(buffer): # 模型可能吧AGENT_META_OPEN分多个chunk返回，上面一个if进来之后可能为"[[AGEN"，只有部分AGENT_META_OPEN开头，这个if就是排除这个场景
+                continue
+            # 走到这里说明模型没有按照规定返回元数据，直接把当前buffer当作正式回复返回
+            meta_finished = True
+            st.session_state["agent_meta_error"] = "模型未按约定返回 AGENT_META"
             yield buffer
             buffer = ""
-    if not title_parsed: # 如果循环结束还是未解析到完整标题，并且未触发128长度限制
-        title_result[0] = "新对话"
-        if buffer:
-            yield buffer
+            continue
+
+        # 找到完整开头之后寻找AGENT_META_CLOSE结尾，如果没找到就continue继续寻找
+        meta_end = buffer.find(AGENT_META_CLOSE, len(AGENT_META_OPEN))
+        if meta_end == -1:
+            continue
+
+        # 解析出元数据与夹带的正式回复(AGENT_META_CLOSE和部分正式回复放在同一个chunk里返回)
+        meta_json = buffer[len(AGENT_META_OPEN):meta_end].strip()
+        remain_body = buffer[meta_end + len(AGENT_META_CLOSE):]
+        meta_finished = True
+
+        # 下面逻辑只有刚刚解析到完整AGENT_META_CLOSE之后才会执行，解析完之后就不会再执行了
+        try:
+            apply_agent_meta(js.loads(meta_json))
+        except js.JSONDecodeError:
+            st.session_state["agent_meta_error"] = "模型返回的 AGENT_META 不是合法 JSON"
+
+        if remain_body:
+            yield remain_body
+
+    if not meta_finished:
+        st.session_state["agent_meta_error"] = "模型未返回完整的 AGENT_META"
     
             
 
@@ -670,7 +737,6 @@ def main():
         "user_selected_image_ids": st.session_state["selected_history_image_ids"].copy() #这里使用拷贝而不是直接赋值是因为list是可变对象，直接赋值之后修改st.session_state["selected_history_image_ids"](每轮交互结束后清空)相当于一起修改了这条消息的user_selected_image_ids，不符合逻辑
     })
 
-
     # 调用大模型生成回答
     stream_response = CHAT_CLIENT.chat.completions.create(
         model=st.session_state["selected_model"],
@@ -679,11 +745,15 @@ def main():
         timeout=180.0
     ) # type: ignore
 
-    stream_gen = first_reply_body_stream(stream_response, title_res) if is_first_round else (chunk.choices[0].delta.content or "" for chunk in stream_response) # 想要生成器对象还能“返回”标题生成结果，最方便的做法是传入一个可变对象title_res(list[str])
+    stream_gen = parse_agent_response_stream(stream_response)
 
     # 流式输出大模型的回复
     with st.chat_message(name="assistant"):
         full_reply = st.write_stream(stream=stream_gen)
+
+    agent_meta_error = st.session_state.pop("agent_meta_error", None)
+    if agent_meta_error:
+        st.warning(f"{agent_meta_error}，本轮图片记忆可能未保存。")
 
     # 将ai生成的回复也添加到messages历史消息列表中
     st.session_state["messages"].append({

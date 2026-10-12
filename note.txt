@@ -71,7 +71,7 @@ response_message.chat_message("assistant").write(full_response)含义:
         //NOTE - 如果没给一个控件设置key，Streamlit会根据组件类型、按钮文字、位置/参数等自动生成内部 ID，但是如果正好凑巧两个同层级、参数相同的按钮的key相同，streamlit会报错：StreamlitDuplicateElementId
 
     (3).一个控件在通过key和session_state的某个key绑定之后不可以：“在这个控件被创建出来之后再通过session_state api来改变这个控件的值“，原因：
-    组件创建时，Streamlit 已经决定该输入框本轮要显示什么值；若后面再改变session_state api，相当于组件已经渲染到页面后，又在后端偷偷改它的绑定值。前端可能显示旧值、后端却存新值，因此 Streamlit 直接禁止这种顺序
+    组件创建时，Streamlit 已经决定该输入框本轮要显示什么值；若后面再改变session_state api，相当于组件已经渲染到页面后，又在后端偷偷改它的绑定值前端可能显示旧值、后端却存新值，因此 Streamlit 直接禁止这种顺序
     (4).st.session_state不是普通的全局字典，它依赖 Streamlit 当前的运行上下文(和streamlit主线程绑定在一起了)，只有在streamlit主线程里访问st.session_state才知道是访问哪个线程(浏览器会话)的session_satte状态
     所以如果出现多线程异步任务，不要在非streamlit主线程中访问session_satte，可以把session_state信息通过参数的形式传递进去
 
@@ -206,7 +206,31 @@ st.write_stream 会阻塞当前脚本后续代码：它会不断从传给它的 
     except StopIteration as e:
         print(e.value)  # 结束信息
     正常 for 循环只能拿到 1、2；执行到 return 时，生成器结束，return 后面的值不会作为普通元素产出，而是放进 StopIteration.value 并作为异常抛出
-    return 的作用主要是提前结束生成器；多数情况下直接写 return 即可；yield 是暂停并产出值，return 是彻底结束。
+    return 的作用主要是提前结束生成器；多数情况下直接写 return 即可；yield 是暂停并产出值，return 是彻底结束
+
+(5).嵌套流解析流程(以函数中包含yield关键字举例)
+流生成器需要有人驱动，一般只有一个驱动语句调用next()驱动最外层的函数，对于每一层函数，被驱动时会从yield处继续向后执行代码，一般会在循环语句处取出下一个流对象，循环语句的迭代相当于对更深层的生成器函数调用next()，此时进入更深层的函数，最后一层函数(循环语句直接作用在真正的流上，没有更深层的函数，会直接取出对应的流，然后执行到最深层对应的yield，控制权开始逐层向上返回)
+例如代码中: "模型返回的原始流 --> extract_content_stream --> parse_agent_response_stream" 就是一条嵌套流，获取正文时的流程应为:
+st.write_stream()
+  ↓ next(stream_gen)
+parse_agent_response_stream()               #层1
+  ↓ for content in content_stream
+  ↓ next(content_stream)
+extract_content_stream() #层2
+  ↓ for chunk in stream_response
+  ↓ 从 Ollama/OpenAI 流取一个 chunk           #"真正"的流
+  ↓ 处理 reasoning，刷新思考框
+  ↓ yield 正文 content                       #从层2返回层1
+parse_agent_response_stream() 收到 content
+  ↓ 解析 AGENT_META 或正文
+  ↓ yield 正式回复片段                        #从层1返回main
+st.write_stream() 收到正式回复片段并渲染
+
+非渲染正文时的流过程:
+    - 模型输出思考过程阶段:
+    因为content字段大部分时候为空，所以大部分控制流都在extract_content_stream()函数内部的for循环内打转(一直continue，没有机会执行yield返回上层函数，但是这个过程会调用render_reasoning_chunk()函数，该函数内部会渲染思考站位块)
+    - 模型输出元数据阶段(假设很长)
+    因为一直没有读取到AGENT_META_CLOSE导致meta_end == -1，所以一直在parse_agent_response_stream()函数内部的for循环内打转(一直continue，没有机会执行yield返回上层函数) --> 进入extract_content_stream，因为此时content非空，所以可以yield content返回parse_agent_response_stream
 
 
 
@@ -528,7 +552,7 @@ dict.pop()的一个用法:
 44.python类对象
 class User:
     pass
-python 不只是记住一段“模板文字”，而是会在内存中创建一个对象，并把它绑定给名字 User。这个对象保存了类名、方法、类属性等信息，所以称为类对象
+python 不只是记住一段“模板文字”，而是会在内存中创建一个对象，并把它绑定给名字 User这个对象保存了类名、方法、类属性等信息，所以称为类对象
 print(User)        # <class '__main__.User'>
 print(type(User))  # <class 'type'>
 
@@ -540,7 +564,7 @@ show_class(User)  # User
 
 User.school = "XX大学"
 print(u.school)   # XX大学
-和 C++ 最容易混淆的地方是：C++ 里 class User { ... }; 更接近编译期的类型定义；Python 里的 class User: 执行时会真正创建 User 这个类对象。
+和 C++ 最容易混淆的地方是：C++ 里 class User { ... }; 更接近编译期的类型定义；Python 里的 class User: 执行时会真正创建 User 这个类对象
 
 45.st.rerun()
 重新执行整个脚本，相当于立刻从头开始执行，上一轮rerun()后面的代码将没机会执行
@@ -616,7 +640,7 @@ Base64 是一种“把二进制数据写成普通文本字符串”的编码方�
     if image_format not in {"PNG", "JPEG", "WEBP"}:
         raise ValueError("只支持 PNG、JPEG、WEBP")
 
-    ==不要只相信 image_file.name 后缀或 image_file.type；它们来自用户文件名/浏览器信息。应以 image.format 为准。==
+    ==不要只相信 image_file.name 后缀或 image_file.type；它们来自用户文件名/浏览器信息应以 image.format 为准==
     image.verify() 用于发现损坏的图片结构；调用后当前 image 对象不能继续使用，需要重新 Image.open()
 
 (3).生成缩略图
@@ -727,7 +751,7 @@ def f1(value: object):
 
 57.上下文与max_tokens
     token:
-        token 可以理解为模型切分文本后的最小片段，不严格等于字或词。中文场景大致可以粗略认为：一个汉字通常约占 1～2 个 token
+        token 可以理解为模型切分文本后的最小片段，不严格等于字或词中文场景大致可以粗略认为：一个汉字通常约占 1～2 个 token
     上下文窗口:
         模型一次最多能读入多少内容，包括系统提示词、历史对话、图片摘要等
     max_token:
@@ -736,7 +760,7 @@ def f1(value: object):
     为什么要限制max_tokens:
         模型偶尔可能陷入重复输出，单次请求持续很久
         代码当前还有 timeout=180.0，超过 180 秒客户端仍可能中断请求
-        不能突破上下文窗口：输入提示词、历史记录、图片内容、已生成的思考和正文共同占用上下文。剩余空间耗尽时，仍会被截断
+        不能突破上下文窗口：输入提示词、历史记录、图片内容、已生成的思考和正文共同占用上下文剩余空间耗尽时，仍会被截断
         上下文越大，显存占用越高；Ollama 官方也说明增加上下文长度会提高内存需求
 
 58.模型输出异常终止
@@ -755,7 +779,7 @@ def f1(value: object):
 - 当前上下文 4K
 - 模型最大支持 262144，只表示模型“理论上认识”这个长度，不表示硬件适合分配这么大的缓存
 
-上下文使用的 KV 缓存会近似线性增长。按当前模型、默认 FP16 KV 缓存粗估:
+上下文使用的 KV 缓存会近似线性增长按当前模型、默认 FP16 KV 缓存粗估:
 | 上下文 | 仅 KV 缓存约占用 |
 |---:|---:|
 | 4K | 0.56 GiB |
@@ -786,3 +810,16 @@ def f1(value: object):
         # 常用于命令分发、插件式功能(上面的command可以通过外部配置传进来)
         - 安全读取可选属性：第三个参数是默认值，属性不存在时不报错，普通.访问属性时如果不存在会报错AttributeError，例如:
         timeout = getattr(config, "timeout", 10)
+
+61.st.empty()
+st.empty()
+	函数作用: 创建一个只容纳一个元素的占位区域，后续调用返回对象的方法可替换其中内容
+	返回值:
+		成功: 返回可继续调用 markdown()、write()、empty() 等方法的占位对象
+	注意事项:
+		每次 placeholder.markdown() 会替换上一份内容，不会自动追加文本
+		要实时展示累积文本，需要先自己拼接字符串，再传给 markdown()
+	简单示例:
+		placeholder = st.empty()
+		placeholder.markdown("第一段内容")
+		placeholder.markdown("更新后的完整内容")

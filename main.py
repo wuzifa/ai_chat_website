@@ -2,7 +2,6 @@ import base64
 import json as js
 import uuid  # 生成会话唯一标识
 from datetime import datetime
-from io import BytesIO
 from os import listdir, remove
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -156,24 +155,36 @@ def apply_agent_meta(agent_meta: object) -> None:
         st.session_state["images"][image_id]["ocr_text"] = ocr_text.strip()
 
 
-def extract_content_stream(stream):
+def render_reasoning_chunk(reasoning_content, reasoning_placeholder):
+    """
+    累加并实时渲染模型生成的一个思考片段
+    """
+    st.session_state["current_reasoning"] += reasoning_content
+    reasoning_placeholder.markdown(st.session_state["current_reasoning"])
+
+
+def extract_content_stream(stream, reasoning_placeholder):
     """
     从模型原始流中提取思考内容和正式回复内容
 
     Args:
         stream (流): 模型返回的原始流
+        reasoning_placeholder (st.empty()占位对象): 用来渲染模型思考过程的输出位置
     """
     for chunk in stream:
         delta = chunk.choices[0].delta
-        # 拆除推理思考字段
-        reasoning_content = getattr(delta, "reasoning", None) # 防止reasoning字段不存在，安全获取对象的推理字段
+        # 拆出推理思考字段
+        reasoning_content = getattr(delta, "reasoning", None) # 在正文输出阶段(非思考阶段), 返回的请求体中会没有reasoning字段，所以这里应该使用getattr()来获取这个字段
         if isinstance(reasoning_content, str) and reasoning_content:
-            st.session_state["current_reasoning"] += reasoning_content # session_state["current_reasoning"]为模型目前为止积累的思考内容
+            render_reasoning_chunk(reasoning_content, reasoning_placeholder)
 
-    # 拆出正文字段
+        # 拆出正文字段
         content = delta.content
         if isinstance(content, str) and content:
             yield content
+
+        if chunk.choices[0].finish_reason == "length": # 每条响应都检查是否出现因为上下文/max_tokens限制导致模型输出中断(据观察每条响应都有finish_reason这个字段，所以这里直接用.访问)
+            st.session_state["response_truncated"] = True
 
 
 def parse_agent_response_stream(content_stream):
@@ -778,17 +789,22 @@ def main():
         timeout=180.0
     ) # type: ignore
 
-    # 获取两个流生成器对象(还未启动流): 模型思考过程和正文回复
-    content_stream = extract_content_stream(stream_response)
-    stream_gen = parse_agent_response_stream(content_stream)
-
     # 流式输出大模型的回复
     with st.chat_message(name="assistant"):
+        with st.expander("思考过程"): # 下拉框: 用户可选是否查看思考过程
+            reasoning_placeholder = st.empty()
+        # 获取两个流生成器对象(还未启动流): 模型思考过程和正文回复
+        content_stream = extract_content_stream(stream_response, reasoning_placeholder)
+        stream_gen = parse_agent_response_stream(content_stream)
+        # 下面这句才真正驱动流进行输出(该函数看起来只渲染正式回复，但是内部的流逻辑会更新思考过程占位块)
         full_reply = st.write_stream(stream=stream_gen)
 
     agent_meta_error = st.session_state.pop("agent_meta_error", None)
     if agent_meta_error:
         st.warning(f"{agent_meta_error}，本轮图片记忆可能未保存")
+
+    if st.session_state.pop("response_truncated", False):
+        st.warning("本轮回复可能因上下文空间不足而被截断")
 
     # 将ai生成的回复也添加到messages历史消息列表中
     st.session_state["messages"].append({
@@ -808,16 +824,3 @@ if __name__ == "__main__":
     main()
 
 #FIXME - BUG: 如果模型上一条对话还为发送完就发送下一条对话，会吧上一条对话给“遮掉”
-#FIXME - 将标题融在文件名里会出现下面情况：在标题未生成前就保存会话，save_dialogue之后出现旧的和新的两份会话文件，并且保存会话之后操作的还是旧的会话文件(st.session_state["current_history_file"]没改)，可能导致同一个会话重复保存不同名会话文件; 同时 current_history_file 也没有在保存后更新
-
-
-# build_api_messages主要是为了图片请求，因为现在messages列表的字典现在携带image_ids图片索引列表，该列表只给本地后段使用，给模型的是图片对应的base64编码(最新一条消息的，历史消息对应的图片一律给摘要)
-# messages中现在既有正式的role, content，也有image_ids，image_ids是用户这轮上传的图片
-
-
-
-
-#TODO - 调用大模型生成回答前先检查session_state中是否有用户选择的历史图片，pop到messages中
-#TODO - 不能再直接把messages扔给模型，需要使用build_api_messages()函数读取messages中包含的图片相关字段，生成适合openai接口的提示词(包含合适的图片相关提示词)
-# 历史消息中包含的image_ids怎么处理：直接告诉模型图片id，这些id涉及的图片记忆卡应该在这轮交互发送之前已经生成好了
-# 本轮消息设计的三类图片：根据messages中具体包含哪些字段生成对应的提示词，没有这类图片就写“无”

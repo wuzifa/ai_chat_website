@@ -1,7 +1,9 @@
 import base64
 import json as js
+import math
 import uuid  # 生成会话唯一标识
 from datetime import datetime
+from io import BytesIO
 from os import listdir, remove
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -99,9 +101,9 @@ NOTWIDGET_FIELDS = { # 应该保存到文件中的字段的白名单(非控件�
 DATA_DIR = Path(__file__).parent / "data"
 # 创建大模型客户端
 CHAT_CLIENT = openai.OpenAI(base_url=BASE_URL) # NOTE - 环境变量里设置了openai_api_key
-MAX_IMAGES_PER_MESSAGE = 4 #单个对话最多上传4张图片
+MAX_IMAGES_PER_REQUEST = 4 # 单轮请求最多附带4张原图
 MAX_IMAGES_PER_SESSION = 20 #单会话最多20张图(主要是性能考量)
-MAX_IMAGE_PIXELS = 1e8 # 最大支持一亿像素图片
+MAX_API_IMAGE_PIXELS = 1_000_000 # 发送给模型的单张图片最大像素数
 IMAGE_FORMAT_TO_MIMEANDSUFFIX = {
     "PNG": ["image/png", ".png"],
     "JPEG": ["image/jpeg", ".jpg"],
@@ -414,9 +416,9 @@ def schedule_task():
         st.rerun() # 重跑脚本，渲染对话与历史会话按钮
         
 
-def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
+def handle_picures(upload_files: list[sttype.UploadedFile]) -> list[str]:
     """
-    保存本轮用户上传的图片信息到session_satte，并返回这些图片对应的 image_id 列表
+    处理用户提交的图片(包含本轮图片和历史图片)
 
     Args:
         upload_files (UploadedFile): st.chat_input返回的files列表
@@ -424,11 +426,14 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
     Returns:
         list[str]: 该函数对于每个被保存的图片生成的id
     """
+    # 校验用户上传图片数量是否超限(单轮对话+会话总数量)
     existing_image_count = len(st.session_state["images"])
-    if len(upload_files) > MAX_IMAGES_PER_MESSAGE:
-        raise ValueError(f"单次最多上传 {MAX_IMAGES_PER_MESSAGE} 张图片")
-    if existing_image_count + len(upload_files) > MAX_IMAGES_PER_SESSION:
-        raise ValueError(f"单个会话最多上传 {MAX_IMAGES_PER_SESSION} 张图片")
+    uploaded_file_count = len(upload_files)
+    history_file_count = len(st.session_state["selected_history_image_ids"]) #NOTE - 这句默认前面已经准备好了selected_history_image_ids，是个不好的代码习惯
+    if uploaded_file_count + history_file_count > MAX_IMAGES_PER_REQUEST:
+        raise ValueError(f"单次最多上传 {MAX_IMAGES_PER_REQUEST} 张图片，本轮携带了 {uploaded_file_count} 张图片")
+    if existing_image_count + uploaded_file_count > MAX_IMAGES_PER_SESSION:
+        raise ValueError(f"单个会话最多上传 {MAX_IMAGES_PER_SESSION} 张图片，当前会话图片已达 {existing_image_count + uploaded_file_count} 张图片")
 
     # 不采取：边一张一张校验同时保存到session_state，采取：全部校验完成之后一起保存到session_state；避免部分失败的情况
     checked_images = [] # 已校验图片
@@ -437,15 +442,13 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
         try:
             with Image.open(image) as image_file:
                 image_format = image_file.format
-                w, h = image_file.size
-                if w * h > MAX_IMAGE_PIXELS: # 校验图片像素尺寸
-                    raise ValueError(f"图片 {image_name} 像素尺寸太大")
                 image_file.verify() # 校验图片完整性
         except (UnidentifiedImageError, OSError): # 校验是否为图片
             raise ValueError(f"图片 {image_name} 无法正常读取")
         if image_format not in IMAGE_FORMAT_TO_MIMEANDSUFFIX: # 校验图片格式是否受支持
             raise ValueError(f"图片 {image_name} 格式为 {image_format}，不支持")
         checked_images.append({
+            "name": image_name,
             "raw_bytes": image.getvalue(),
             "mime_type": IMAGE_FORMAT_TO_MIMEANDSUFFIX[image_format][0],
             "suffix": IMAGE_FORMAT_TO_MIMEANDSUFFIX[image_format][1]
@@ -462,6 +465,7 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
         saved_path = attachments_dir / f"{image_id}{checked_image["suffix"]}" # 需要保存的图片绝对路径
         saved_path.write_bytes(checked_image["raw_bytes"]) # 保存图片到saved_path
         st.session_state["images"][image_id] = {
+            "name": checked_image["name"],
             "path": str(saved_path.relative_to(DATA_DIR)),
             "mime_type": checked_image["mime_type"],
             "summary": "摘要尚未生成",
@@ -471,6 +475,18 @@ def save_uploaded_images(upload_files: list[sttype.UploadedFile]) -> list[str]:
         st.session_state["next_image_seq"] += 1
 
     return image_ids
+
+
+def reject_user_submission(prompt: str, error_info: str) -> None:
+    """
+    中止本轮提交，保留用户输入的文字并在下一次重跑后显示错误
+    """
+    st.session_state["last_rounderror"] = {
+        "prompt": prompt,
+        "error_info": error_info
+    }
+    st.rerun()
+
 
 def check_last_image_error():
     error = st.session_state.pop("last_rounderror", None)
@@ -494,7 +510,7 @@ def render_image_checkboxs() -> None:
         for image_id, info in st.session_state["images"].items():
             image_col, selected_col = st.columns([1, 2])
             with image_col:
-                st.image(DATA_DIR/info["path"], width=100)
+                st.image(DATA_DIR/info["path"], width=100) # 该图片大小主要受侧边栏宽度影响
             with selected_col:
                 selected = st.checkbox(
                     label=image_id,
@@ -552,7 +568,8 @@ def build_image_context_prompt() -> str:
 
 def image_id_to_api_content(image_id: str) -> dict:
     """
-    读取本地原图，临时转换为 OpenAI 兼容的 image_url 
+    读取本地原图(单张)，临时转换为 OpenAI 兼容的 image_url
+    内部会将超过像素限制的图片压缩到限制以下
     
     Args:
         image_id (str): 图片id
@@ -569,7 +586,42 @@ def image_id_to_api_content(image_id: str) -> dict:
     path: Path = DATA_DIR / info["path"]
     if not path.is_file():
         raise FileNotFoundError(f"找不到图片: {path}")
-    encoded_str = base64.b64encode(path.read_bytes()).decode("ascii")
+    with Image.open(path) as image_file:
+        # 获取原图片 长，宽，像素
+        width, height = image_file.size
+        image_pixels = width * height
+
+        # 如果该图片像素大于单图片最大像素限制，则需要进行压缩
+        if image_pixels <= MAX_API_IMAGE_PIXELS:
+            image_bytes = path.read_bytes()
+        else:
+            # 根据像素进行压缩，目标为将像素压缩到最大像素限制以下，这里计算长宽压缩比例
+            scale = math.sqrt(MAX_API_IMAGE_PIXELS / image_pixels)
+            resized_size = (
+                math.floor(width * scale),
+                math.floor(height * scale)
+            )
+            # 根据前面计算出的长宽进行压缩，采取保留最完成的LANCZOS重采样算法
+            resized_image = image_file.resize(
+                size=resized_size,
+                resample=Image.Resampling.LANCZOS
+            )
+            # 防止用户选择jpeg保存图片但是图片中包含alpha透明通，解决方案是转换为不含透明通道模式
+            if info["mime_type"] == "image/jpeg" and resized_image.mode in {"RGBA", "LA"}:
+                resized_image = resized_image.convert("RGB")
+            # 将Image对象转换为对应格式图片的二进制字节
+            image_buffer = BytesIO()
+            resized_image.save(image_buffer, format=image_file.format)
+            image_bytes = image_buffer.getvalue()
+            # 添加记录: 哪些图片压缩像素
+            st.session_state["compressed_images"].append({
+                "image_id": image_id,
+                "name": info.get("name", image_id),
+                "original_size": (width, height),
+                "resized_size": resized_size
+            })
+    # 进行base64编码
+    encoded_str = base64.b64encode(image_bytes).decode("ascii")
     return {
         "type": "image_url",
         "image_url": f"data:{info['mime_type']};base64,{encoded_str}"
@@ -604,6 +656,8 @@ def build_api_messages() -> list[dict]:
             "content": build_image_context_prompt()
         },
     ]
+
+    st.session_state["compressed_images"] = [] # 在这轮图片请求构造开始前先将compressed_images记录列表遗留的上一轮结果清空
 
     now = 2 # raw_messages[1] 对应第一条用户消息，其位置号为 2
     # 组装用户历史提示词/模型回复
@@ -733,7 +787,7 @@ def main():
                     image_info = st.session_state["images"][image_id]
                     image_path = DATA_DIR / image_info["path"]
                     if image_path.is_file():
-                        st.image(image_path, width=150)
+                        st.image(image_path, width=250)
                     else:
                         st.warning(f"图片 {image_id} 的原文件不存在")
             # 再渲染用户提示词
@@ -754,28 +808,37 @@ def main():
 
     schedule_task() # 必须放在if not prompt前面调用，因为如果当前会话用户还从未填写过提示词，只是把这个会话加载出来，这个函数就不会被调用，也就不会注册这个fragment函数
 
-    # 如果用户没有实际输入，下面的新一轮对话就不用渲染了
+    # 用户只勾选历史图片时，构造空文字和空上传文件的默认输入，后续仍可走统一提交流程
     if not user_input:
-        return
+        if not st.session_state["selected_history_image_ids"]:
+            return
+        user_input = {
+            "text": "请描述这些图片",
+            "files": []
+        }
 
-    # 保存用户提交的图片
+    # 处理本轮请求相关图片
     image_ids: list[str] = []
-    if user_input.files:
-        try:
-            image_ids = save_uploaded_images(user_input.files) # 内部保存并校验用户上传的图片，校验失败会抛出异常，进入异常捕获分支直接rerun()，不会进入下面渲染用户本轮消息的脚本
-        except ValueError as e:
-            st.session_state["last_rounderror"] = {
-                "prompt": user_input["text"],
-                "error_info": str(e)
-            }
-            st.rerun()
+    try:
+        image_ids = handle_picures(user_input["files"]) # 内部保存并校验用户上传的图片，验失败会抛出异常，进入异常捕获分支直接rerun()，不会进入下面渲染用户本轮消息的脚本
+    except ValueError as e:
+        reject_user_submission(user_input["text"], str(e))
 
     # 渲染用户本轮消息用户文字和图片放在同一个聊天消息区域内渲染
     with st.chat_message(name="user"):
         if user_input["text"]:
             st.write(user_input["text"])
-        for image in user_input.files:
-            st.image(image, width=150)
+        # 渲染用户新上传图片
+        for image in user_input["files"]:
+            st.image(image, width=250)
+        # 渲染用户历史图片
+        for image_id in st.session_state["selected_history_image_ids"]:
+            image_info = st.session_state["images"][image_id]
+            image_path = DATA_DIR / image_info["path"]
+            if image_path.is_file():
+                st.image(image_path, width=250)
+            else:
+                st.warning(f"图片 {image_id} 的原文件不存在")
 
     
     st.session_state["messages"].append({
@@ -786,6 +849,24 @@ def main():
     })
 
     # 调用大模型生成回答
+    #TEST
+    api_messages = build_api_messages()
+    request_debug_file = Path(__file__).parent / "debug_api_messages.json"
+    request_debug_file.write_text(
+        js.dumps(api_messages, ensure_ascii=False, indent=4),
+        encoding="utf-8"
+    )
+    #TEST
+
+    # 显示给用户哪些图片被调整了大小
+    for image_info in st.session_state.get("compressed_images", []): # 这里使用get获取，当不存在(首次发送消息时不携带图片)时返回空列表，也是一个不好的代码习惯
+        original_width, original_height = image_info["original_size"]
+        resized_width, resized_height = image_info["resized_size"]
+        st.warning(
+            f"图片 {image_info['name']}({image_info["image_id"]}) 发送时已从 {original_width} × {original_height} "
+            f"压缩为 {resized_width} × {resized_height}"
+        )
+    
     st.session_state["current_reasoning"] = "" # 接收模型生成的回复钱先清空上一轮的思考内容
     stream_response = CHAT_CLIENT.chat.completions.create(
         model=st.session_state["selected_model"],

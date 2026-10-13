@@ -28,7 +28,7 @@ SYSTEM_PROMPT_TEMPLATE = """
 2. AGENT_META 中必须是合法 JSON 对象，不能使用 Markdown 代码块
 3. 正式回复只能写在 [[/AGENT_META]] 之后
 4. 不要向用户解释、复述或展示 AGENT_META
-5. title只有在系统明确要求总结标题时需要填写标题，其余情况保持null；images 默认输出空数组；只有系统明确要求总结本轮图片时，才填写对应图片信息
+5. title 只有在系统明确要求总结标题时需要填写标题，其余情况保持 null；images 默认输出空数组，只有图片提示词中“本轮新上传图片”不为“无”时才能填写图片信息
 6. 使用中文回答用户
 
 用户对于你的要求：
@@ -46,21 +46,25 @@ IMAGE_PROMPT = r"""
 【本轮新上传图片】
 %s
 
-说明：
-- “历史图片目录”列出当前会话所有已保存图片的记忆信息
-- “本轮精确历史图片”会在本轮请求中附带原图，不要重复生成记忆卡
-- “本轮新上传图片”会在本轮请求中附带原图，必须生成对应记忆卡
+图片理解规则：
+- “历史图片目录”只提供摘要和 OCR，供你概括理解历史图片
+- “本轮精确历史图片”会附带原图，只供本轮精确回答
+- “本轮新上传图片”会附带原图，是本轮唯一允许生成图片记忆卡的图片
 - 某个图片若同时出现在目录和“精确历史图片”中，以附带的原图为准
 
-2.图片记忆卡生成规则：
+AGENT_META.images 严格规则：
+- 只能为“本轮新上传图片”列表中的 image_id 生成记忆卡
+- 如果“本轮新上传图片”为“无”，必须输出 "images": []
+- 历史图片目录和本轮精确历史图片中的任何图片，都禁止生成、更新或重复输出记忆卡
+- 即使用户在本轮提及、询问、比较历史图片，也只可利用其摘要或附带原图回答，不能把历史图片写入 AGENT_META.images
 
-(1). 生成在 AGENT_META.images 项
-(2). 每张记忆卡的格式：
-    {"image_id": "img_001", "summary": "图片摘要", "ocr_text": "关键文字"}
-(3). summary：不超过 30 个汉字；概括图片主体、关键内容、可检索关键词和重要问题
-(4). ocr_text：仅提取清晰且重要的可见文字；没有则使用空字符串
-(5). 图片看不清或无法确认时，summary 中应说明不确定性；不要编造细节或 OCR 文字
-(6). 不要在正式回复中展示 AGENT_META、JSON 或内部图片编号，除非用户主动要求图片编号
+图片记忆卡格式：
+- 生成在 AGENT_META.images 项
+- 每张格式：{"image_id": "本轮新上传图片ID", "summary": "图片摘要", "ocr_text": "关键文字"}
+- summary：不超过 30 个汉字；概括图片主体、关键内容、可检索关键词和重要问题
+- ocr_text：仅提取清晰且重要的可见文字；没有则使用空字符串
+- 图片看不清或无法确认时，summary 中应说明不确定性；不要编造细节或 OCR 文字
+- 不要在正式回复中展示 AGENT_META、JSON 或内部图片编号，除非用户主动要求图片编号
 """
 
 AGENT_META_OPEN = "[[AGENT_META]]"
@@ -247,7 +251,8 @@ def create_new_dialogue():
     只做：新建一个默认会话，重置所有session_state状态
     """
     # 重置会话状态
-    st.session_state = {}
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
     st.session_state["name"] = DEFAULT_MODEL_NAME
     st.session_state["character"] = DEFAULT_MODEL_CHARACTER
     st.session_state["messages"] = [{"role": "system", "content": SYSTEM_PROMPT_TEMPLATE % (DEFAULT_MODEL_NAME, DEFAULT_MODEL_CHARACTER)}]
@@ -713,7 +718,7 @@ def main():
         st.text_area(label="伴侣性格", key="character")
         st.button("确定", on_click=set_sysprompt)
         if st.session_state.pop("sysprompt_saved", False):
-            st.markdown("**✅ 已应用伴侣信息**") #AGENT - 有没有类似弹窗的那种效果，弹窗提示应用成功，过会弹窗自消失
+            st.toast("成功应用伴侣信息", icon='😀')
         st.divider()
 
         render_image_checkboxs() # 渲染历史图片复选框

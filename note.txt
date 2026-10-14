@@ -856,3 +856,11 @@ st.empty()
 		placeholder = st.empty()
 		placeholder.markdown("第一段内容")
 		placeholder.markdown("更新后的完整内容")
+
+62.chat_input返回的user_input
+只要有发送行为，无论是文件还是提示词，这个对象就非空，不存在的发送材料对应字段为空而不是该字段不存在(例如用户没有发送文件，文件列表字段存在，但是列表为空)
+
+63.保存图片转换为的base64字符串
+macOS 的 base64 默认会每隔一段字符插入换行，而 JSON 字符串中不能直接出现真实换行
+可以使用:
+base64 -i /绝对路径/图片.png | tr -d '\n' | pbcopy # 放进剪贴板，也可以使用 >/>>写入文件

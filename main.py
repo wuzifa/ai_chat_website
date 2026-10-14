@@ -19,19 +19,16 @@ DELETE_CHAT_ICON = ":material/delete:"
 SAMPLE_CHAT_PROMPT = "你能帮我做什么？"
 BASE_URL = "http://172.20.10.4:11434/v1"
 SYSTEM_PROMPT_TEMPLATE = """
-你必须严格按以下顺序输出：
+回复必须从以下结构开始，之后再输出正式正文：
 [[AGENT_META]]
 {"title": null, "images": []}
 [[/AGENT_META]]
-正式回复正文...
 
-规则：
-1. AGENT_META 必须位于输出最开头，前面不能有任何文字
-2. AGENT_META 中必须是合法 JSON 对象，不能使用 Markdown 代码块
-3. 正式回复只能写在 [[/AGENT_META]] 之后
-4. 不要向用户解释、复述或展示 AGENT_META
-5. title 只有在系统明确要求总结标题时需要填写标题，其余情况保持 null；images 默认输出空数组，只有图片提示词中“本轮新上传图片”不为“无”时才能填写图片信息
-6. 使用中文回答用户
+要求：
+- AGENT_META 必须位于输出最开头，内容为合法 JSON，不能使用 Markdown 代码块；不要在正文展示或解释它
+- 只有系统明确要求时才填写 title，否则为 null
+- images 必须按图片提示词填写
+- 使用中文回答用户
 
 用户对于你的要求：
 你的名字：%s
@@ -48,32 +45,17 @@ IMAGE_PROMPT = r"""
 【本轮新上传图片】
 %s
 
-图片理解规则：
-- “历史图片目录”只提供摘要和 OCR，供你概括理解历史图片
-- “本轮精确历史图片”会附带原图，只供本轮精确回答
-- “本轮新上传图片”会附带原图，是本轮唯一允许生成图片记忆卡的图片
-- 某个图片若同时出现在目录和“精确历史图片”中，以附带的原图为准
-
-AGENT_META.images 严格规则：
-- 只能为“本轮新上传图片”列表中的 image_id 生成记忆卡
-- 如果“本轮新上传图片”为“无”，必须输出 "images": []
-- 历史图片目录和本轮精确历史图片中的任何图片，都禁止生成、更新或重复输出记忆卡
-- 即使用户在本轮提及、询问、比较历史图片，也只可利用其摘要或附带原图回答，不能把历史图片写入 AGENT_META.images
-
-图片记忆卡格式：
-- 生成在 AGENT_META.images 项
-- 每张格式：{"image_id": "本轮新上传图片ID", "summary": "图片摘要", "ocr_text": "关键文字"}
-- summary：不超过 30 个汉字；概括图片主体、关键内容、可检索关键词和重要问题
-- ocr_text：仅提取清晰且重要的可见文字；没有则使用空字符串
-- 图片看不清或无法确认时，summary 中应说明不确定性；不要编造细节或 OCR 文字
-- 不要在正式回复中展示 AGENT_META、JSON 或内部图片编号，除非用户主动要求图片编号
+图片规则：
+- 历史图片目录仅提供摘要和 OCR，供概括理解；本轮精确历史图片会附带原图，供精确回答。两者均禁止生成、更新或重复输出图片记忆卡；
+- 本轮新上传图片会附带原图，必须为列表中的每个 image_id 生成一张图片记忆卡，并写入 AGENT_META.images，格式为 {"image_id": "本轮新上传图片ID", "summary": "图片摘要", "ocr_text": "关键文字"}。只有没有新上传图片时，images 才能为 []。
+- summary 不超过 30 个汉字，概括主体、关键内容和重要问题；ocr_text 只保留清晰、重要的可见文字，最多 120 个字符，没有则为空字符串。看不清时说明不确定性，不要编造。
 """
 
 AGENT_META_OPEN = "[[AGENT_META]]"
 AGENT_META_CLOSE = "[[/AGENT_META]]"
 TITLE_GENERATE_PROMPT = """
 本轮是新会话的第一轮回复
-请在 AGENT_META.title 项中生成一个标题
+AGENT_META.title 必须填写标题，不能为 null
 
 1.标题只概括用户问题主题
 2.不要在标题中使用引号、标点、序号或换行
@@ -104,6 +86,7 @@ CHAT_CLIENT = openai.OpenAI(base_url=BASE_URL) # NOTE - 环境变量里设置了
 MAX_IMAGES_PER_REQUEST = 4 # 单轮请求最多附带4张原图
 MAX_IMAGES_PER_SESSION = 20 #单会话最多20张图(主要是性能考量)
 MAX_API_IMAGE_PIXELS = 1_000_000 # 发送给模型的单张图片最大像素数
+MAX_OCR_TEXT_LENGTH = 120 # 图片记忆卡中 OCR 文字的最大字符数
 IMAGE_FORMAT_TO_MIMEANDSUFFIX = {
     "PNG": ["image/png", ".png"],
     "JPEG": ["image/jpeg", ".jpg"],
@@ -158,7 +141,7 @@ def apply_agent_meta(agent_meta: object) -> None:
             continue
 
         st.session_state["images"][image_id]["summary"] = summary.strip()[:30] # 只保存前30个字，后面的截掉
-        st.session_state["images"][image_id]["ocr_text"] = ocr_text.strip()
+        st.session_state["images"][image_id]["ocr_text"] = ocr_text.strip()[:MAX_OCR_TEXT_LENGTH] # 只保存前120个字符，避免过长 OCR 耗费模型上下文
 
 
 def render_reasoning_chunk(reasoning_content, reasoning_placeholder):
@@ -166,7 +149,7 @@ def render_reasoning_chunk(reasoning_content, reasoning_placeholder):
     累加并实时渲染模型生成的一个思考片段
     """
     st.session_state["current_reasoning"] += reasoning_content
-    reasoning_placeholder.markdown(st.session_state["current_reasoning"])
+    reasoning_placeholder.caption(st.session_state["current_reasoning"]) # 不用markdown，否则思考过程字太大了，会把思考过程拉得很长
 
 
 def extract_content_stream(stream, reasoning_placeholder):
@@ -523,9 +506,12 @@ def render_image_checkboxs() -> None:
     # 直接赋值到session_state["selected_history_image_ids"]而不是append，追加不符合逻辑！！
     st.session_state["selected_history_image_ids"] = selected_ids
 
-def build_image_catalogue() -> str:
+def build_image_catalogue(exclude_image_ids: set[str]) -> str:
     """
-    构造所有已存在历史图片的摘要目录
+    构造历史图片的摘要目录，排除本轮新上传图片(handle_pictures函数会保存本轮新上传的图片到session_state，所以这里需要排除这些图片；不把保存图片的逻辑和handle_pictures函数拆开的原因是会大幅增加代码耦合度，并且还要大量修改代码，对结构影响太大)
+
+    Args:
+        exclude_image_ids: 不应写入历史图片目录的图片 ID 集合
 
     Returns:
         str: 历史图片摘要目录，格式：
@@ -538,6 +524,8 @@ def build_image_catalogue() -> str:
         return "无"
     lines: list[str] = []
     for id, info in images.items():
+        if id in exclude_image_ids: # 排除本轮新上传的图片
+            continue
         summary = info["summary"].strip()
         ocr_text = info["ocr_text"].strip()
         lines.append(f"- {id}：{summary}；OCR：{ocr_text}")
@@ -554,14 +542,13 @@ def build_image_context_prompt() -> str:
     Returns:
         str: 动态图片提示词，格式见IMAGE_PROMPT
     """
-    catalogue = build_image_catalogue()
-
     latest_user_message = st.session_state["messages"][-1] # 从最新用户消息生成提示词
     # 用户选择的历史图片
     selected_history_image_ids: list[str] = latest_user_message["user_selected_image_ids"]
     selected_text: str = ("、".join(selected_history_image_ids) if selected_history_image_ids else "无")
     # 用户这轮新上传的图片
     new_image_ids: list[str] = latest_user_message["uploaded_image_ids"]
+    catalogue = build_image_catalogue(set(new_image_ids))
     new_text = "、".join(new_image_ids) if new_image_ids else "无"
     return IMAGE_PROMPT % (catalogue, selected_text, new_text)
 
@@ -714,10 +701,7 @@ def build_api_messages() -> list[dict]:
         for image_id in uploaded_image_ids:
             content_parts.append({
                 "type": "text",
-                "text": (
-                    f"【以下附带原图对应本轮新上传图片 {image_id}】"
-                    "请为该图片生成图片记忆卡"
-                )
+                "text": f"【以下附带原图对应本轮新上传图片 {image_id}】"
             })
             content_parts.append(image_id_to_api_content(image_id)) # 添加原图对应的 openai api content 块
         api_messages.append({ # 向api_messages添加本轮请求对应的请求体
@@ -781,7 +765,13 @@ def main():
     # 渲染历史聊天记录
     for message in st.session_state["messages"][1::]:
         with st.chat_message(name=message["role"]):
-            # 先逐张渲染用户上传的图片
+            # 如果是模型，需要渲染思考过程
+            if message["role"] == "assistant" and "reasoning" in message:
+                with st.expander("思考过程"):
+                    st.caption(message["reasoning"])
+            # 先渲染文字
+            st.markdown(message["content"])
+            # 再渲染图片
             if message["role"] == "user":
                 for image_id in message["uploaded_image_ids"]:
                     image_info = st.session_state["images"][image_id]
@@ -790,8 +780,6 @@ def main():
                         st.image(image_path, width=250)
                     else:
                         st.warning(f"图片 {image_id} 的原文件不存在")
-            # 再渲染用户提示词
-            st.markdown(message["content"])
 
     # 渲染在页面最底部
     with st.bottom:  # noqa: SIM117
@@ -810,26 +798,21 @@ def main():
 
     # 用户只勾选历史图片时，构造空文字和空上传文件的默认输入，后续仍可走统一提交流程
     if not user_input:
-        if not st.session_state["selected_history_image_ids"]:
             return
-        user_input = {
-            "text": "请描述这些图片",
-            "files": []
-        }
 
     # 处理本轮请求相关图片
     image_ids: list[str] = []
     try:
-        image_ids = handle_picures(user_input["files"]) # 内部保存并校验用户上传的图片，验失败会抛出异常，进入异常捕获分支直接rerun()，不会进入下面渲染用户本轮消息的脚本
+        image_ids = handle_picures(user_input.files) # 内部保存并校验用户上传的图片，验失败会抛出异常，进入异常捕获分支直接rerun()，不会进入下面渲染用户本轮消息的脚本
     except ValueError as e:
-        reject_user_submission(user_input["text"], str(e))
+        reject_user_submission(user_input.text, str(e))
 
     # 渲染用户本轮消息用户文字和图片放在同一个聊天消息区域内渲染
     with st.chat_message(name="user"):
-        if user_input["text"]:
-            st.write(user_input["text"])
+        if user_input.text:
+            st.write(user_input.text)
         # 渲染用户新上传图片
-        for image in user_input["files"]:
+        for image in user_input.files:
             st.image(image, width=250)
         # 渲染用户历史图片
         for image_id in st.session_state["selected_history_image_ids"]:
@@ -843,20 +826,12 @@ def main():
     
     st.session_state["messages"].append({
         "role": "user", 
-        "content": user_input["text"],
+        "content": user_input.text,
         "uploaded_image_ids": image_ids,
         "user_selected_image_ids": st.session_state["selected_history_image_ids"].copy() #这里使用拷贝而不是直接赋值是因为list是可变对象，直接赋值之后修改st.session_state["selected_history_image_ids"](每轮交互结束后清空)相当于一起修改了这条消息的user_selected_image_ids，不符合逻辑
     })
 
     # 调用大模型生成回答
-    #TEST
-    api_messages = build_api_messages()
-    request_debug_file = Path(__file__).parent / "debug_api_messages.json"
-    request_debug_file.write_text(
-        js.dumps(api_messages, ensure_ascii=False, indent=4),
-        encoding="utf-8"
-    )
-    #TEST
 
     # 显示给用户哪些图片被调整了大小
     for image_info in st.session_state.get("compressed_images", []): # 这里使用get获取，当不存在(首次发送消息时不携带图片)时返回空列表，也是一个不好的代码习惯
@@ -895,7 +870,8 @@ def main():
     # 将ai生成的回复也添加到messages历史消息列表中
     st.session_state["messages"].append({
         "role": "assistant",
-        "content": full_reply
+        "content": full_reply,
+        "reasoning": st.session_state["current_reasoning"]
     })
     st.session_state["updated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["dirty"] = True
